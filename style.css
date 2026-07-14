@@ -67,6 +67,14 @@ header {
   letter-spacing: 2px;
 }
 
+#spec-chip {
+  background: var(--panel-2);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font-size: 13px;
+  color: var(--text);
+}
+
 main {
   flex: 1;
   display: flex;
@@ -171,6 +179,15 @@ main {
   width: 100%;
   display: flex;
   justify-content: center;
+  position: relative;
+}
+
+#table-wrap::before {
+  content: '';
+  position: absolute;
+  inset: -50px -30px;
+  background: radial-gradient(58% 68% at 50% 45%, rgba(46, 157, 91, 0.16), transparent 72%);
+  pointer-events: none;
 }
 
 #table {

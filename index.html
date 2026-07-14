@@ -13,6 +13,7 @@
     <div class="brand">🎱 Sinuca Online</div>
     <div id="room-chip" class="hidden">
       <span>Sala <strong id="room-code"></strong></span>
+      <span id="spec-chip" class="hidden" title="Espectadores">👁 <span id="spec-n">0</span></span>
       <button id="btn-copy" class="small">Copiar link</button>
       <button id="btn-leave" class="small danger">Sair</button>
     </div>
@@ -44,7 +45,7 @@
   <div id="menu" class="overlay">
     <div class="dialog" id="panel-main">
       <h1>🎱 Sinuca Online</h1>
-      <p class="sub">Bola 8 para dois jogadores. Crie uma sala, envie o link e jogue com um amigo — direto no navegador, sem cadastro.</p>
+      <p class="sub">Bola 8 para dois jogadores. Crie uma sala, envie o link e jogue com um amigo — direto no navegador, sem cadastro. Quem entrar depois assiste como espectador.</p>
       <label class="field">
         Seu nome
         <input id="inp-name" maxlength="14" placeholder="Jogador" autocomplete="nickname" />
@@ -60,7 +61,7 @@
 
     <div class="dialog hidden" id="panel-wait">
       <h2>Sala criada!</h2>
-      <p class="sub">Envie o código ou o link para o seu amigo:</p>
+      <p class="sub">Envie o código ou o link para o seu amigo. O primeiro a entrar joga; os demais assistem.</p>
       <div class="big-code" id="wait-code"></div>
       <button id="btn-copy-wait" class="primary big">Copiar link de convite</button>
       <p id="wait-status" class="pulse">Aguardando seu amigo entrar…</p>

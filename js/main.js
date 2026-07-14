@@ -1,21 +1,39 @@
 import {
-  W, H, RAIL, R, POCKETS, MAX_SHOT_SPEED,
+  W, H, RAIL, R, POCKETS, TOP_SEGS, LEFT_SEGS, MAX_SHOT_SPEED,
   step, allStopped, predictShot, validCuePosition,
 } from './physics.js';
 import {
-  makeInitialState, evaluateShot, serializeState, deserializeState,
-  remaining, isSolid,
+  makeInitialState, evaluateShot, serializeState, deserializeState, isSolid,
 } from './rules.js';
 import { Net, makeRoomCode } from './net.js';
 
 const TW = W + RAIL * 2;
 const TH = H + RAIL * 2;
+const PULL_RANGE = 220; // px de puxada para força máxima
+const MAX_SPECTATORS = 8;
 
 const COLORS = {
   1: '#f6c445', 2: '#2f6fd0', 3: '#d8342c', 4: '#7e3f9d',
   5: '#ef7d20', 6: '#2e9d5b', 7: '#8d3b2f', 8: '#20242c',
 };
 const ballColor = (id) => COLORS[id > 8 ? id - 8 : id];
+
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  let r = (n >> 16) & 255;
+  let g = (n >> 8) & 255;
+  let b = n & 255;
+  if (f >= 0) {
+    r += (255 - r) * f;
+    g += (255 - g) * f;
+    b += (255 - b) * f;
+  } else {
+    r *= 1 + f;
+    g *= 1 + f;
+    b *= 1 + f;
+  }
+  return `rgb(${r | 0},${g | 0},${b | 0})`;
+}
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
@@ -27,6 +45,7 @@ const els = {
   waitCode: $('wait-code'), waitStatus: $('wait-status'),
   hud: $('hud'), msg: $('msg'), hint: $('hint'),
   roomChip: $('room-chip'), roomCode: $('room-code'),
+  specChip: $('spec-chip'), specN: $('spec-n'),
   end: $('end'), endMsg: $('end-msg'), btnRematch: $('btn-rematch'),
   toast: $('toast'),
   cards: [
@@ -36,27 +55,35 @@ const els = {
 };
 
 // ---------- Estado da aplicação ----------
-let mode = 'menu'; // menu | local | host | guest
-let mySeat = 0;
+let mode = 'menu'; // menu | local | host | guest | spectator
+let mySeat = 0; // -1 para espectador
 let names = ['Jogador 1', 'Jogador 2'];
 let state = makeInitialState(0, names);
 let net = null;
 let roomCode = '';
 let gameStarted = false;
 
+// anfitrião: papéis das conexões
+let playerConnId = null;
+const spectatorIds = new Set();
+let specCount = 0;
+
 let shooting = false; // eu estou simulando uma tacada
-let remoteShooting = false; // o adversário está simulando
+let remoteShooting = false; // o jogador remoto está simulando
 let shotSeat = 0;
 let ev = null; // eventos da tacada em curso
 
 let pointer = { x: -999, y: -999, inside: false, down: false };
-let remoteAim = null; // {x, y, down}
+// mira: hover segue o cursor; ao pressionar trava a direção e a puxada dá a força
+let aim = { charging: false, dirX: 1, dirY: 0, pressX: 0, pressY: 0, power: 0 };
+let remoteAim = null; // {dx, dy, pow, ch}
 let ghostCue = null; // prévia da bola na mão (local ou remota)
+const sinkAnims = new Map(); // id -> {x0,y0,px,py,t0}
 let lastAimSent = 0;
 let lastFrameSent = 0;
 
 const myTurn = () =>
-  !state.over && gameStarted && (mode === 'local' || state.turn === mySeat);
+  !state.over && gameStarted && mode !== 'spectator' && (mode === 'local' || state.turn === mySeat);
 const canAim = () =>
   myTurn() && !shooting && !remoteShooting && !state.ballInHand && !state.balls[0].pocketed;
 
@@ -97,7 +124,7 @@ function sfx(kind, vol = 1) {
     o.start(t); o.stop(t + 0.2);
   }
 }
-function drainSounds() {
+function drainShotEvents() {
   if (!ev) return;
   let played = 0;
   for (const s of ev.sounds) {
@@ -105,6 +132,20 @@ function drainSounds() {
     sfx(s.kind, s.vol);
   }
   ev.sounds.length = 0;
+  for (const s of ev.sunk) {
+    sinkAnims.set(s.id, { x0: s.x, y0: s.y, px: s.px, py: s.py, t0: performance.now() });
+  }
+  ev.sunk.length = 0;
+}
+
+function nearestPocketTo(x, y) {
+  let best = POCKETS[0];
+  let bd = Infinity;
+  for (const p of POCKETS) {
+    const d = Math.hypot(x - p.x, y - p.y);
+    if (d < bd) { bd = d; best = p; }
+  }
+  return best;
 }
 
 // ---------- Ciclo da tacada ----------
@@ -114,7 +155,7 @@ function shoot(dirX, dirY, power) {
   cue.vx = dirX * speed;
   cue.vy = dirY * speed;
   shotSeat = state.turn;
-  ev = { firstHit: null, pocketed: [], sounds: [] };
+  ev = { firstHit: null, pocketed: [], sunk: [], sounds: [] };
   shooting = true;
   remoteAim = null;
   sfx('click', 0.4 + power * 0.6);
@@ -125,7 +166,7 @@ function finishShot() {
   sendFrame(true);
   evaluateShot(state, shotSeat, ev, names);
   ev = null;
-  if (net) net.send({ t: 'e', s: serializeState(state) });
+  broadcast({ t: 'e', s: serializeState(state) });
   updateHud();
   if (state.over) showEnd(state.msg);
 }
@@ -135,7 +176,7 @@ function sendFrame(force) {
   const now = performance.now();
   if (!force && now - lastFrameSent < 40) return;
   lastFrameSent = now;
-  net.send({
+  broadcast({
     t: 'f',
     b: state.balls.map((b) => [
       Math.round(b.x * 10) / 10,
@@ -145,55 +186,184 @@ function sendFrame(force) {
   });
 }
 
+// envia mensagem de jogo para todos os interessados
+function broadcast(msg) {
+  if (net && net.connected) net.send(msg);
+}
+
+function sendAim(force) {
+  if (!net || !net.connected || !canAim()) return;
+  const now = performance.now();
+  if (!force && now - lastAimSent < 50) return;
+  lastAimSent = now;
+  const cue = state.balls[0];
+  let dx;
+  let dy;
+  if (aim.charging) {
+    dx = aim.dirX;
+    dy = aim.dirY;
+  } else {
+    const vx = pointer.x - cue.x;
+    const vy = pointer.y - cue.y;
+    const d = Math.hypot(vx, vy);
+    if (d < 4 || !pointer.inside) return;
+    dx = vx / d;
+    dy = vy / d;
+  }
+  broadcast({ t: 'a', dx, dy, pow: aim.charging ? aim.power : 0, ch: aim.charging ? 1 : 0 });
+}
+
 // ---------- Rede ----------
 function makeNet() {
   return new Net({
     onMessage: handleMessage,
-    onOpen: () => {
+    onOpen: (connId) => {
       if (mode === 'guest') net.send({ t: 'hello', name: names[1] });
+      void connId;
     },
-    onClose: () => {
-      if (gameStarted) {
-        showEnd('O outro jogador saiu da partida.', true);
+    onConnClose: (connId) => {
+      if (mode === 'host') {
+        if (connId === playerConnId && gameStarted) {
+          showEnd('O outro jogador saiu da partida.', true);
+        } else if (spectatorIds.delete(connId)) {
+          setSpectators(spectatorIds.size);
+        }
+      } else if (gameStarted) {
+        showEnd(mode === 'spectator' ? 'A transmissão terminou.' : 'O outro jogador saiu da partida.', true);
       } else if (mode === 'guest') {
-        setStatus('error', 'Não foi possível entrar: sala cheia ou indisponível.');
+        setStatus('error', 'Não foi possível entrar na sala.');
         showPanel('main');
       }
     },
     onStatus: setStatus,
+    onCodeChange: (fresh) => {
+      roomCode = fresh;
+      els.waitCode.textContent = fresh;
+      els.roomCode.textContent = fresh;
+    },
   });
 }
 
-function handleMessage(m) {
+function setSpectators(n) {
+  specCount = n;
+  updateSpecChip();
+  if (mode === 'host') broadcast({ t: 'spec', n });
+}
+
+function updateSpecChip() {
+  els.specChip.classList.toggle('hidden', specCount <= 0);
+  els.specN.textContent = specCount;
+}
+
+function handleMessage(m, connId) {
   if (!m || typeof m !== 'object') return;
-  switch (m.t) {
-    case 'hello': // host: convidado chegou
-      if (mode !== 'host' || gameStarted) return;
-      names[1] = String(m.name || 'Jogador 2').slice(0, 14) || 'Jogador 2';
+  if (mode === 'host') handleHostMessage(m, connId);
+  else handleClientMessage(m);
+}
+
+function handleHostMessage(m, connId) {
+  if (m.t === 'hello') {
+    const name = String(m.name || '').slice(0, 14);
+    if (playerConnId === null && !gameStarted) {
+      playerConnId = connId;
+      names[1] = name || 'Jogador 2';
       state = makeInitialState(0, names);
-      net.send({ t: 'welcome', n: names, s: serializeState(state) });
+      net.sendTo(connId, { t: 'welcome', role: 'player', n: names, s: serializeState(state), spec: specCount });
       startGame();
-      break;
-    case 'welcome': // guest: partida começou
-      if (mode !== 'guest') return;
+    } else if (spectatorIds.size < MAX_SPECTATORS) {
+      spectatorIds.add(connId);
+      net.sendTo(connId, { t: 'welcome', role: 'spectator', n: names, s: serializeState(state), spec: spectatorIds.size });
+      setSpectators(spectatorIds.size);
+      toast(`${name || 'Alguém'} entrou para assistir 👁`);
+    } else {
+      net.sendTo(connId, { t: 'full' });
+      net.closeConn(connId);
+    }
+    return;
+  }
+  if (connId !== playerConnId) {
+    if (m.t === 'bye' && spectatorIds.delete(connId)) {
+      net.closeConn(connId);
+      setSpectators(spectatorIds.size);
+    }
+    return; // espectadores não interferem no jogo
+  }
+  if (m.t === 'bye') {
+    showEnd('O outro jogador saiu da partida.', true);
+    return;
+  }
+  if (m.t === 'wr') {
+    doRematch();
+    return;
+  }
+  // repassa a transmissão do jogador para os espectadores
+  if (m.t === 'f' || m.t === 'e' || m.t === 'a' || m.t === 'ph' || m.t === 'pf') {
+    net.sendExcept(connId, m);
+  }
+  applyGameMessage(m);
+}
+
+function handleClientMessage(m) {
+  switch (m.t) {
+    case 'welcome':
       names = m.n;
       state = deserializeState(m.s);
+      specCount = m.spec || 0;
+      if (m.role === 'spectator') {
+        mode = 'spectator';
+        mySeat = -1;
+      }
       startGame();
+      updateSpecChip();
+      if (mode === 'spectator') toast('Partida em andamento — você está assistindo 👁');
       break;
-    case 'a': // prévia de mira do adversário
-      remoteAim = m.off ? null : { x: m.x, y: m.y, down: !!m.d };
+    case 'full':
+      setStatus('error', 'Sala cheia (jogo + espectadores). Tente mais tarde.');
+      if (net) net.close();
+      net = null;
+      mode = 'menu';
+      showPanel('main');
       break;
-    case 'f': { // quadro de animação da tacada do adversário
+    case 'spec':
+      specCount = m.n;
+      updateSpecChip();
+      break;
+    case 'r': // anfitrião reiniciou
+      state = deserializeState(m.s);
+      remoteShooting = false;
+      ghostCue = null;
+      remoteAim = null;
+      sinkAnims.clear();
+      hideEnd();
+      updateHud();
+      break;
+    case 'bye':
+      showEnd(mode === 'spectator' ? 'A transmissão terminou.' : 'O outro jogador saiu da partida.', true);
+      break;
+    default:
+      applyGameMessage(m);
+  }
+}
+
+// mensagens de jogo comuns a convidado, espectador e anfitrião
+function applyGameMessage(m) {
+  switch (m.t) {
+    case 'a': // prévia de mira do jogador remoto
+      remoteAim = m.off ? null : { dx: m.dx, dy: m.dy, pow: m.pow || 0, ch: !!m.ch };
+      break;
+    case 'f': { // quadro de animação da tacada remota
       remoteShooting = true;
       remoteAim = null;
       for (let i = 0; i < m.b.length && i < state.balls.length; i++) {
         const b = state.balls[i];
         const [x, y, p] = m.b[i];
-        b.x = x; b.y = y;
         if (p && !b.pocketed) {
           b.pocketed = true;
+          const pk = nearestPocketTo(b.x, b.y);
+          sinkAnims.set(b.id, { x0: b.x, y0: b.y, px: pk.x, py: pk.y, t0: performance.now() });
           sfx('pocket', 1);
         }
+        b.x = x; b.y = y;
       }
       break;
     }
@@ -218,19 +388,6 @@ function handleMessage(m) {
       updateHud();
       break;
     }
-    case 'wr': // convidado pediu revanche — anfitrião aceita
-      if (mode === 'host') doRematch();
-      break;
-    case 'r': // anfitrião reiniciou
-      state = deserializeState(m.s);
-      remoteShooting = false;
-      ghostCue = null;
-      hideEnd();
-      updateHud();
-      break;
-    case 'bye':
-      showEnd('O outro jogador saiu da partida.', true);
-      break;
   }
 }
 
@@ -253,7 +410,8 @@ function inviteLink() {
 function toast(text) {
   els.toast.textContent = text;
   els.toast.classList.add('show');
-  setTimeout(() => els.toast.classList.remove('show'), 1800);
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => els.toast.classList.remove('show'), 2200);
 }
 
 function myName() {
@@ -275,7 +433,7 @@ function startGame() {
 
 function showEnd(text, disconnected = false) {
   els.endMsg.textContent = text;
-  els.btnRematch.classList.toggle('hidden', !!disconnected);
+  els.btnRematch.classList.toggle('hidden', !!disconnected || mode === 'spectator');
   els.btnRematch.disabled = false;
   els.btnRematch.textContent = 'Revanche';
   els.end.classList.remove('hidden');
@@ -297,7 +455,8 @@ function doRematch() {
   ghostCue = null;
   remoteAim = null;
   ev = null;
-  if (mode === 'host' && net) net.send({ t: 'r', s: serializeState(state) });
+  sinkAnims.clear();
+  if (mode === 'host') broadcast({ t: 'r', s: serializeState(state) });
   hideEnd();
   updateHud();
 }
@@ -340,10 +499,12 @@ function updateHud() {
   els.msg.textContent = state.msg || '';
   let hint = '';
   if (!state.over) {
-    if (state.ballInHand && myTurn()) {
+    if (mode === 'spectator') {
+      hint = `👁 Você está assistindo. ${names[state.turn]} joga.`;
+    } else if (state.ballInHand && myTurn()) {
       hint = 'Bola na mão: toque na mesa para posicionar a branca.';
     } else if (myTurn() && !shooting && !remoteShooting) {
-      hint = 'Arraste a partir da branca para mirar — quanto mais longe, mais força. Solte para tacar.';
+      hint = 'Mire com o cursor, pressione e puxe para trás para dar força; solte para tacar.';
     } else if (!myTurn() && mode !== 'local') {
       hint = `Aguardando ${names[state.turn]}…`;
     }
@@ -371,15 +532,17 @@ canvas.addEventListener('pointermove', (e) => {
       const now = performance.now();
       if (now - lastAimSent > 60) {
         lastAimSent = now;
-        net.send({ t: 'ph', x: p.x, y: p.y });
+        broadcast({ t: 'ph', x: p.x, y: p.y });
       }
     }
-  } else if (canAim() && net && net.connected) {
-    const now = performance.now();
-    if (now - lastAimSent > 60) {
-      lastAimSent = now;
-      net.send({ t: 'a', x: p.x, y: p.y, d: pointer.down ? 1 : 0 });
+    return;
+  }
+  if (canAim()) {
+    if (aim.charging) {
+      const proj = (aim.pressX - p.x) * aim.dirX + (aim.pressY - p.y) * aim.dirY;
+      aim.power = Math.min(1, Math.max(0, proj / PULL_RANGE));
     }
+    sendAim(false);
   }
 });
 
@@ -393,6 +556,21 @@ canvas.addEventListener('pointerdown', (e) => {
   try {
     canvas.setPointerCapture(e.pointerId);
   } catch (_) { /* ignore */ }
+  if (canAim() && !state.ballInHand) {
+    const cue = state.balls[0];
+    const dx = p.x - cue.x;
+    const dy = p.y - cue.y;
+    const d = Math.hypot(dx, dy);
+    if (d > R + 2) {
+      aim.charging = true;
+      aim.dirX = dx / d;
+      aim.dirY = dy / d;
+      aim.pressX = p.x;
+      aim.pressY = p.y;
+      aim.power = 0;
+      sendAim(true);
+    }
+  }
   e.preventDefault();
 });
 
@@ -402,6 +580,8 @@ canvas.addEventListener('pointerup', (e) => {
   pointer.y = p.y;
   const wasDown = pointer.down;
   pointer.down = false;
+  const wasCharging = aim.charging;
+  aim.charging = false;
   if (!wasDown || !gameStarted || state.over) return;
 
   if (state.ballInHand && myTurn()) {
@@ -412,29 +592,31 @@ canvas.addEventListener('pointerup', (e) => {
       cue.vx = 0; cue.vy = 0;
       state.ballInHand = false;
       ghostCue = null;
-      if (net) net.send({ t: 'pf', x: p.x, y: p.y });
+      broadcast({ t: 'pf', x: p.x, y: p.y });
       updateHud();
     }
     return;
   }
 
-  if (canAim()) {
-    const cue = state.balls[0];
-    const dx = p.x - cue.x;
-    const dy = p.y - cue.y;
-    const dist = Math.hypot(dx, dy);
-    const power = Math.min(1, Math.max(0, (dist - 25) / 300));
-    if (power >= 0.05) {
-      shoot(dx / dist, dy / dist, power);
-      if (net && net.connected) net.send({ t: 'a', off: true });
+  if (wasCharging && canAim()) {
+    if (aim.power >= 0.02) {
+      shoot(aim.dirX, aim.dirY, aim.power);
+      broadcast({ t: 'a', off: true });
       updateHud();
+    } else {
+      sendAim(true); // puxada cancelada: volta à mira de hover
     }
   }
 });
 
+canvas.addEventListener('pointercancel', () => {
+  pointer.down = false;
+  aim.charging = false;
+});
+
 canvas.addEventListener('pointerleave', () => {
   pointer.inside = false;
-  if (net && net.connected && canAim()) net.send({ t: 'a', off: true });
+  if (!aim.charging && net && net.connected && canAim()) broadcast({ t: 'a', off: true });
 });
 
 // ---------- Desenho ----------
@@ -448,92 +630,160 @@ function roundRect(x, y, w, h, r) {
   ctx.closePath();
 }
 
-function drawTable() {
-  // moldura de madeira
-  const wood = ctx.createLinearGradient(0, 0, 0, TH);
-  wood.addColorStop(0, '#7b4a22');
-  wood.addColorStop(1, '#5d3618');
-  ctx.fillStyle = wood;
-  roundRect(0, 0, TW, TH, 22);
-  ctx.fill();
+const FELT_PAD = 14;
 
-  // feltro
-  const feltPad = 14;
-  ctx.fillStyle = '#0c6b4a';
-  roundRect(RAIL - feltPad, RAIL - feltPad, W + feltPad * 2, H + feltPad * 2, 10);
-  ctx.fill();
-  const felt = ctx.createRadialGradient(
-    RAIL + W / 2, RAIL + H / 2, 60,
-    RAIL + W / 2, RAIL + H / 2, W * 0.62
-  );
-  felt.addColorStop(0, 'rgba(255,255,255,0.05)');
-  felt.addColorStop(1, 'rgba(0,0,0,0.16)');
-  ctx.fillStyle = felt;
-  roundRect(RAIL - feltPad, RAIL - feltPad, W + feltPad * 2, H + feltPad * 2, 10);
-  ctx.fill();
-
-  // linha da cabeceira + ponto do triângulo
-  ctx.strokeStyle = 'rgba(255,255,255,0.14)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(RAIL + W * 0.25, RAIL + 6);
-  ctx.lineTo(RAIL + W * 0.25, RAIL + H - 6);
-  ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.18)';
-  ctx.beginPath();
-  ctx.arc(RAIL + W * 0.72, RAIL + H / 2, 3, 0, Math.PI * 2);
-  ctx.fill();
-
-  // marcas nos trilhos
-  ctx.fillStyle = 'rgba(240,220,180,0.5)';
-  for (let i = 1; i < 8; i++) {
-    if (i === 4) continue;
-    const x = RAIL + (W * i) / 8;
-    ctx.beginPath(); ctx.arc(x, RAIL / 2 - 4, 2.5, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(x, TH - RAIL / 2 + 4, 2.5, 0, Math.PI * 2); ctx.fill();
-  }
-  for (let i = 1; i < 4; i++) {
-    const y = RAIL + (H * i) / 4;
-    ctx.beginPath(); ctx.arc(RAIL / 2 - 4, y, 2.5, 0, Math.PI * 2); ctx.fill();
-    ctx.beginPath(); ctx.arc(TW - RAIL / 2 + 4, y, 2.5, 0, Math.PI * 2); ctx.fill();
-  }
-
-  // caçapas
-  for (const p of POCKETS) {
+function drawCushions() {
+  // trapézios com pontas cortadas junto às caçapas (casa com a física dos queixos)
+  ctx.fillStyle = '#0a5d40';
+  const trap = (ax, ay, bx, by, cx, cy, dx, dy) => {
     ctx.beginPath();
-    ctx.arc(RAIL + p.x, RAIL + p.y, p.r - 3, 0, Math.PI * 2);
-    ctx.fillStyle = '#08090c';
+    ctx.moveTo(ax, ay);
+    ctx.lineTo(bx, by);
+    ctx.lineTo(cx, cy);
+    ctx.lineTo(dx, dy);
+    ctx.closePath();
     ctx.fill();
-    ctx.strokeStyle = 'rgba(0,0,0,0.55)';
-    ctx.lineWidth = 5;
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.lineWidth = 1;
     ctx.stroke();
+  };
+  for (const [a, b] of TOP_SEGS) {
+    trap(a - 9, -FELT_PAD, b + 9, -FELT_PAD, b - 3, 0, a + 3, 0);
+    trap(a - 9, H + FELT_PAD, b + 9, H + FELT_PAD, b - 3, H, a + 3, H);
+  }
+  for (const [a, b] of LEFT_SEGS) {
+    trap(-FELT_PAD, a - 9, -FELT_PAD, b + 9, 0, b - 3, 0, a + 3);
+    trap(W + FELT_PAD, a - 9, W + FELT_PAD, b + 9, W, b - 3, W, a + 3);
   }
 }
 
-function drawBall(x, y, id, alpha = 1) {
+function drawTable() {
+  // moldura de madeira com verniz
+  const wood = ctx.createLinearGradient(0, 0, 0, TH);
+  wood.addColorStop(0, '#8a5a2b');
+  wood.addColorStop(0.5, '#6d4322');
+  wood.addColorStop(1, '#54311a');
+  ctx.fillStyle = wood;
+  roundRect(0, 0, TW, TH, 22);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,235,200,0.18)';
+  ctx.lineWidth = 2;
+  roundRect(1.5, 1.5, TW - 3, TH - 3, 21);
+  ctx.stroke();
+
+  // filete dourado
+  ctx.strokeStyle = 'rgba(230,195,120,0.35)';
+  ctx.lineWidth = 1.5;
+  roundRect(RAIL - FELT_PAD - 5, RAIL - FELT_PAD - 5, W + (FELT_PAD + 5) * 2, H + (FELT_PAD + 5) * 2, 14);
+  ctx.stroke();
+
+  // feltro
+  ctx.fillStyle = '#0c6b4a';
+  roundRect(RAIL - FELT_PAD, RAIL - FELT_PAD, W + FELT_PAD * 2, H + FELT_PAD * 2, 10);
+  ctx.fill();
+
+  ctx.save();
+  ctx.translate(RAIL, RAIL);
+  drawCushions();
+
+  // linha da cabeceira + ponto do triângulo
+  ctx.strokeStyle = 'rgba(255,255,255,0.13)';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(W * 0.25, 6);
+  ctx.lineTo(W * 0.25, H - 6);
+  ctx.stroke();
+  ctx.fillStyle = 'rgba(255,255,255,0.17)';
+  ctx.beginPath();
+  ctx.arc(W * 0.72, H / 2, 3, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // vinheta do feltro
+  const felt = ctx.createRadialGradient(
+    RAIL + W / 2, RAIL + H / 2, 80,
+    RAIL + W / 2, RAIL + H / 2, W * 0.64
+  );
+  felt.addColorStop(0, 'rgba(255,255,255,0.05)');
+  felt.addColorStop(1, 'rgba(0,0,0,0.22)');
+  ctx.fillStyle = felt;
+  roundRect(RAIL - FELT_PAD, RAIL - FELT_PAD, W + FELT_PAD * 2, H + FELT_PAD * 2, 10);
+  ctx.fill();
+
+  // losangos de madrepérola nos trilhos
+  ctx.fillStyle = 'rgba(240,225,195,0.55)';
+  const diamond = (x, y) => {
+    ctx.save();
+    ctx.translate(x, y);
+    ctx.rotate(Math.PI / 4);
+    ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
+    ctx.restore();
+  };
+  for (let i = 1; i < 8; i++) {
+    if (i === 4) continue;
+    const x = RAIL + (W * i) / 8;
+    diamond(x, RAIL / 2 - 5);
+    diamond(x, TH - RAIL / 2 + 5);
+  }
+  for (let i = 1; i < 4; i++) {
+    const y = RAIL + (H * i) / 4;
+    diamond(RAIL / 2 - 5, y);
+    diamond(TW - RAIL / 2 + 5, y);
+  }
+
+  // caçapas com anel de couro
+  for (const p of POCKETS) {
+    const px = RAIL + p.x;
+    const py = RAIL + p.y;
+    const vis = p.r - 3;
+    ctx.beginPath();
+    ctx.arc(px, py, vis + 3, 0, Math.PI * 2);
+    ctx.strokeStyle = '#2e1c10';
+    ctx.lineWidth = 6;
+    ctx.stroke();
+    const hole = ctx.createRadialGradient(px, py, 2, px, py, vis);
+    hole.addColorStop(0, '#000');
+    hole.addColorStop(0.75, '#07090c');
+    hole.addColorStop(1, '#12181e');
+    ctx.beginPath();
+    ctx.arc(px, py, vis, 0, Math.PI * 2);
+    ctx.fillStyle = hole;
+    ctx.fill();
+  }
+}
+
+function drawBall(x, y, id, alpha = 1, scale = 1) {
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.translate(RAIL + x, RAIL + y);
+  ctx.scale(scale, scale);
 
   ctx.beginPath();
-  ctx.ellipse(1.5, 2.5, R, R * 0.85, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.28)';
+  ctx.ellipse(1.5, 2.8, R * 0.95, R * 0.8, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.25)';
   ctx.fill();
 
+  const base = id === 0 ? '#f2eee0' : id <= 8 ? ballColor(id) : '#f2eee0';
+  const body = ctx.createRadialGradient(-R * 0.4, -R * 0.45, R * 0.15, 0, 0, R * 1.08);
+  body.addColorStop(0, shade(base, 0.55));
+  body.addColorStop(0.5, base);
+  body.addColorStop(1, shade(base, -0.45));
   ctx.beginPath();
   ctx.arc(0, 0, R, 0, Math.PI * 2);
-  if (id === 0) {
-    ctx.fillStyle = '#f4f1e8';
-    ctx.fill();
-  } else if (id <= 8) {
-    ctx.fillStyle = ballColor(id);
-    ctx.fill();
-  } else {
-    ctx.fillStyle = '#f4f1e8';
-    ctx.fill();
+  ctx.fillStyle = body;
+  ctx.fill();
+
+  if (id > 8) {
     ctx.save();
+    ctx.beginPath();
+    ctx.arc(0, 0, R, 0, Math.PI * 2);
     ctx.clip();
-    ctx.fillStyle = ballColor(id);
+    const c = ballColor(id);
+    const band = ctx.createLinearGradient(0, -R * 0.5, 0, R * 0.5);
+    band.addColorStop(0, shade(c, 0.25));
+    band.addColorStop(0.5, c);
+    band.addColorStop(1, shade(c, -0.3));
+    ctx.fillStyle = band;
     ctx.fillRect(-R, -R * 0.5, R * 2, R);
     ctx.restore();
   }
@@ -550,9 +800,9 @@ function drawBall(x, y, id, alpha = 1) {
     ctx.fillText(String(id), 0, 0.5);
   }
 
-  const shine = ctx.createRadialGradient(-R * 0.35, -R * 0.45, 1, -R * 0.35, -R * 0.45, R);
-  shine.addColorStop(0, 'rgba(255,255,255,0.55)');
-  shine.addColorStop(0.35, 'rgba(255,255,255,0.08)');
+  const shine = ctx.createRadialGradient(-R * 0.38, -R * 0.5, 0.5, -R * 0.38, -R * 0.5, R * 0.9);
+  shine.addColorStop(0, 'rgba(255,255,255,0.7)');
+  shine.addColorStop(0.3, 'rgba(255,255,255,0.1)');
   shine.addColorStop(1, 'rgba(255,255,255,0)');
   ctx.beginPath();
   ctx.arc(0, 0, R, 0, Math.PI * 2);
@@ -561,19 +811,46 @@ function drawBall(x, y, id, alpha = 1) {
   ctx.restore();
 }
 
-function drawAim(px, py, down, dim) {
+function drawCueStick(cue, dirX, dirY, power, charging, alpha) {
+  const pull = charging ? 14 + power * 70 : 12;
+  const tipD = R + pull;
+  const buttD = tipD + 245;
+  const tx = cue.x - dirX * tipD;
+  const ty = cue.y - dirY * tipD;
+  const bx = cue.x - dirX * buttD;
+  const by = cue.y - dirY * buttD;
+  ctx.save();
+  ctx.translate(RAIL, RAIL);
+  ctx.globalAlpha = alpha;
+  const grad = ctx.createLinearGradient(tx, ty, bx, by);
+  grad.addColorStop(0, '#e9dfc6');
+  grad.addColorStop(0.06, '#d9b47c');
+  grad.addColorStop(0.6, '#a76b34');
+  grad.addColorStop(1, '#53341c');
+  ctx.strokeStyle = grad;
+  ctx.lineWidth = 5;
+  ctx.lineCap = 'round';
+  ctx.beginPath();
+  ctx.moveTo(tx, ty);
+  ctx.lineTo(bx, by);
+  ctx.stroke();
+  // ponteira azul (giz)
+  ctx.beginPath();
+  ctx.arc(tx, ty, 2.7, 0, Math.PI * 2);
+  ctx.fillStyle = '#5b8fc7';
+  ctx.fill();
+  ctx.restore();
+}
+
+function drawAim(dirX, dirY, power, charging, dim) {
   const cue = state.balls[0];
   if (cue.pocketed) return;
-  const dx = px - cue.x;
-  const dy = py - cue.y;
-  const dist = Math.hypot(dx, dy);
-  if (dist < 4) return;
-  const dirX = dx / dist;
-  const dirY = dy / dist;
   const pred = predictShot(state.balls, cue, dirX, dirY);
-  if (!pred) return;
+  const alpha = dim ? 0.45 : 1;
 
-  const alpha = dim ? 0.4 : 1;
+  drawCueStick(cue, dirX, dirY, power, charging, alpha * 0.95);
+
+  if (!pred) return;
   ctx.save();
   ctx.translate(RAIL, RAIL);
   ctx.globalAlpha = alpha;
@@ -604,30 +881,68 @@ function drawAim(px, py, down, dim) {
     ctx.lineTo(target.x + pred.tx * 44, target.y + pred.ty * 44);
     ctx.stroke();
   }
+  ctx.restore();
 
-  // medidor de força ao redor da branca
-  if (down) {
-    const power = Math.min(1, Math.max(0, (dist - 25) / 300));
-    if (power > 0) {
-      const hue = 120 - power * 120;
-      ctx.strokeStyle = `hsl(${hue} 85% 55%)`;
-      ctx.lineWidth = 4;
-      ctx.beginPath();
-      ctx.arc(cue.x, cue.y, R + 7, -Math.PI / 2, -Math.PI / 2 + power * Math.PI * 2);
-      ctx.stroke();
-    }
+  if (charging) drawPowerBar(power, alpha);
+}
+
+function drawPowerBar(power, alpha) {
+  const bw = 190;
+  const bh = 10;
+  const bx = RAIL + W / 2 - bw / 2;
+  const by = TH - RAIL / 2 - bh / 2 + 8;
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  roundRect(bx, by, bw, bh, 5);
+  ctx.fillStyle = 'rgba(0,0,0,0.45)';
+  ctx.fill();
+  if (power > 0.01) {
+    const grad = ctx.createLinearGradient(bx, 0, bx + bw, 0);
+    grad.addColorStop(0, '#37b96c');
+    grad.addColorStop(0.55, '#e3c53a');
+    grad.addColorStop(1, '#d8342c');
+    roundRect(bx + 1.5, by + 1.5, (bw - 3) * power, bh - 3, 3.5);
+    ctx.fillStyle = grad;
+    ctx.fill();
   }
+  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+  ctx.lineWidth = 1;
+  roundRect(bx, by, bw, bh, 5);
+  ctx.stroke();
   ctx.restore();
 }
 
 function render() {
+  const now = performance.now();
   ctx.clearRect(0, 0, TW, TH);
   drawTable();
 
-  if (canAim() && pointer.inside) {
-    drawAim(pointer.x, pointer.y, pointer.down, false);
-  } else if (remoteAim && !myTurn() && !remoteShooting && !state.ballInHand) {
-    drawAim(remoteAim.x, remoteAim.y, remoteAim.down, true);
+  const animating = shooting || remoteShooting;
+  if (canAim() && (pointer.inside || aim.charging)) {
+    if (aim.charging) {
+      drawAim(aim.dirX, aim.dirY, aim.power, true, false);
+    } else {
+      const cue = state.balls[0];
+      const dx = pointer.x - cue.x;
+      const dy = pointer.y - cue.y;
+      const d = Math.hypot(dx, dy);
+      if (d > 4) drawAim(dx / d, dy / d, 0, false, false);
+    }
+  } else if (remoteAim && !myTurn() && !animating && !state.ballInHand && !state.over) {
+    drawAim(remoteAim.dx, remoteAim.dy, remoteAim.pow, remoteAim.ch, true);
+  }
+
+  // bolas afundando nas caçapas
+  for (const [id, s] of sinkAnims) {
+    const t = (now - s.t0) / 380;
+    if (t >= 1) {
+      sinkAnims.delete(id);
+      continue;
+    }
+    const ease = t * t * (3 - 2 * t);
+    const x = s.x0 + (s.px - s.x0) * ease;
+    const y = s.y0 + (s.py - s.y0) * ease;
+    drawBall(x, y, id, 1 - ease * 0.9, 1 - ease * 0.65);
   }
 
   for (const b of state.balls) {
@@ -639,7 +954,7 @@ function render() {
 
   if (state.ballInHand && ghostCue) {
     ctx.save();
-    if (!ghostCue.remote && !ghostCue.valid) ctx.filter = 'grayscale(1)';
+    if (!ghostCue.remote && !ghostCue.valid) ctx.filter = 'grayscale(1) brightness(1.2)';
     drawBall(ghostCue.x, ghostCue.y, 0, 0.55);
     ctx.restore();
   } else if (state.ballInHand && !cue.pocketed) {
@@ -663,7 +978,7 @@ function loop(now) {
       acc -= STEP_DT;
       n++;
     }
-    drainSounds();
+    drainShotEvents();
     sendFrame(false);
     if (allStopped(state.balls)) finishShot();
   } else {
@@ -790,4 +1105,6 @@ window.__sinuca = {
   get state() { return state; },
   get shooting() { return shooting; },
   get mode() { return mode; },
+  get specCount() { return specCount; },
+  get aim() { return aim; },
 };
