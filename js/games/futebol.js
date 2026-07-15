@@ -1,7 +1,7 @@
 // Futebol de botão: cada time tem 5 peças (círculos). Na sua vez, escolha uma
 // peça e arremesse-a para empurrar a bola ao gol adversário. Primeiro a 3
 // gols (ou melhor placar após 24 jogadas).
-import { stepBall, collideBalls, AimControl, drawAim, drawOrb, throttler, roundRect } from '../engine.js';
+import { stepBall, collideBalls, AimControl, drawAim, throttler, drawFrame, Trail, Fx, shade } from '../engine.js';
 
 const GOALS_TO_WIN = 3;
 const MAX_FLICKS = 24;
@@ -24,6 +24,14 @@ export default {
     const sendFrame = throttler(40);
     const controls = (seat) => env.isLocal || env.seat === seat;
     const myMove = () => st && !st.over && st.phase === 'aim' && controls(st.turn);
+    const trail = new Trail(8);
+    const fx = new Fx();
+
+    function goalFx(who) {
+      fx.banner('⚽ GOL!', { color: who === 0 ? '#ff8a5c' : '#59b7ff' });
+      fx.burst(who === 0 ? Rr : L, (T + B) / 2, '#ffd54d', 26, 340);
+      trail.clear();
+    }
 
     function formation() {
       const cy = (T + B) / 2;
@@ -64,6 +72,8 @@ export default {
     function applyFull(s) {
       st.pieces = s.pieces.map(([x, y, team]) => ({ x, y, vx: 0, vy: 0, team }));
       st.ball = { x: s.ball[0], y: s.ball[1], vx: 0, vy: 0 };
+      if (s.sc[0] !== st.sc[0]) goalFx(0);
+      else if (s.sc[1] !== st.sc[1]) goalFx(1);
       st.sc = s.sc.slice();
       st.flicks = s.flicks;
       st.turn = s.turn;
@@ -89,6 +99,7 @@ export default {
       if (st.goalScored !== null) {
         st.sc[st.goalScored]++;
         env.sfx('score', 1);
+        goalFx(st.goalScored);
         resetPositions();
         st.turn = 1 - st.goalScored; // quem sofreu recomeça
       } else {
@@ -189,7 +200,9 @@ export default {
       },
       key() {},
       tick(dt) {
+        fx.tick(dt);
         if (!st || st.phase !== 'moving') return;
+        trail.push(st.ball.x, st.ball.y);
         let acc = dt;
         while (acc > 0) {
           const h = Math.min(1 / 240, acc);
@@ -208,44 +221,128 @@ export default {
       },
       draw(ctx) {
         if (!st) return;
-        // campo
-        roundRect(ctx, L - 14, T - 14, Rr - L + 28, B - T + 28, 14);
-        ctx.fillStyle = '#1e7a3c';
-        ctx.fill();
-        for (let i = 0; i < 8; i++) {
-          ctx.fillStyle = i % 2 ? 'rgba(255,255,255,0.035)' : 'rgba(0,0,0,0.03)';
-          ctx.fillRect(L + ((Rr - L) * i) / 8, T, (Rr - L) / 8, B - T);
+        drawFrame(ctx, L, T, Rr - L, B - T, 40, {
+          felt: '#1c6e38', woodA: '#3f5a45', woodB: '#22322a', vignette: 0.2, pad: 12,
+        });
+        // faixas do gramado
+        for (let i = 0; i < 10; i++) {
+          ctx.fillStyle = i % 2 ? 'rgba(255,255,255,0.045)' : 'rgba(0,0,0,0.045)';
+          ctx.fillRect(L + ((Rr - L) * i) / 10, T, (Rr - L) / 10, B - T);
         }
-        ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+        // marcações
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
         ctx.lineWidth = 2.5;
         ctx.strokeRect(L, T, Rr - L, B - T);
         ctx.beginPath(); ctx.moveTo(env.W / 2, T); ctx.lineTo(env.W / 2, B); ctx.stroke();
         ctx.beginPath(); ctx.arc(env.W / 2, (T + B) / 2, 62, 0, Math.PI * 2); ctx.stroke();
-        // áreas
-        ctx.strokeRect(L, (T + B) / 2 - 110, 90, 220);
-        ctx.strokeRect(Rr - 90, (T + B) / 2 - 110, 90, 220);
-        // gols (redes)
-        ctx.fillStyle = 'rgba(255,255,255,0.25)';
-        ctx.fillRect(L - 22, GT, 22, GOAL_H);
-        ctx.fillRect(Rr, GT, 22, GOAL_H);
-        ctx.strokeStyle = '#fff';
-        ctx.strokeRect(L - 22, GT, 22, GOAL_H);
-        ctx.strokeRect(Rr, GT, 22, GOAL_H);
-        // peças
+        ctx.beginPath(); ctx.arc(env.W / 2, (T + B) / 2, 4, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        ctx.fill();
+        // grandes áreas + pequenas áreas + meia-luas + marca do pênalti
+        for (const side of [0, 1]) {
+          const dir = side === 0 ? 1 : -1;
+          const gx = side === 0 ? L : Rr;
+          ctx.strokeRect(side === 0 ? gx : gx - 96, (T + B) / 2 - 112, 96, 224);
+          ctx.strokeRect(side === 0 ? gx : gx - 40, (T + B) / 2 - 62, 40, 124);
+          ctx.beginPath();
+          ctx.arc(gx + dir * 96, (T + B) / 2, 36, side === 0 ? -Math.PI / 2.6 : Math.PI - Math.PI / 2.6, side === 0 ? Math.PI / 2.6 : Math.PI + Math.PI / 2.6);
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.arc(gx + dir * 66, (T + B) / 2, 2.5, 0, Math.PI * 2);
+          ctx.fill();
+        }
+        // arcos de escanteio
+        for (const [cx, cy, a0] of [[L, T, 0], [Rr, T, Math.PI / 2], [Rr, B, Math.PI], [L, B, -Math.PI / 2]]) {
+          ctx.beginPath();
+          ctx.arc(cx, cy, 12, a0, a0 + Math.PI / 2);
+          ctx.stroke();
+        }
+        // gols com rede
+        for (const [gx, dir] of [[L, -1], [Rr, 1]]) {
+          const x0 = dir === -1 ? gx - 24 : gx;
+          ctx.fillStyle = 'rgba(10,16,12,0.55)';
+          ctx.fillRect(x0, GT, 24, GOAL_H);
+          ctx.strokeStyle = 'rgba(235,240,245,0.5)';
+          ctx.lineWidth = 1;
+          for (let x = x0 + 4; x < x0 + 24; x += 6) {
+            ctx.beginPath(); ctx.moveTo(x, GT); ctx.lineTo(x, GB); ctx.stroke();
+          }
+          for (let y = GT + 5; y < GB; y += 9) {
+            ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(x0 + 24, y); ctx.stroke();
+          }
+          ctx.strokeStyle = '#f2f5f8';
+          ctx.lineWidth = 4;
+          ctx.strokeRect(x0, GT, 24, GOAL_H);
+        }
+        // rastro da bola
+        trail.draw(ctx, BALL_R, '#ffffff');
+        // peças estilo botão (disco com anel e número)
         st.pieces.forEach((p, i) => {
-          drawOrb(ctx, p.x, p.y, PIECE_R, p.team === 0 ? '#ff8a5c' : '#59b7ff');
-          if (i === st.sel && myMove()) {
-            ctx.strokeStyle = '#ffd54d';
-            ctx.lineWidth = 3;
+          const color = p.team === 0 ? '#e04a3a' : '#2f6fd0';
+          const myTeamTurn = !st.over && st.phase === 'aim' && p.team === st.turn && controls(st.turn);
+          ctx.beginPath();
+          ctx.ellipse(p.x + 2, p.y + 4, PIECE_R, PIECE_R * 0.72, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.3)';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(p.x, p.y + 3, PIECE_R, PIECE_R * 0.9, 0, 0, Math.PI * 2);
+          ctx.fillStyle = shade(color, -0.5);
+          ctx.fill();
+          const g = ctx.createRadialGradient(p.x - 6, p.y - 7, 2, p.x, p.y, PIECE_R + 2);
+          g.addColorStop(0, shade(color, 0.45));
+          g.addColorStop(0.7, color);
+          g.addColorStop(1, shade(color, -0.3));
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, PIECE_R, 0, Math.PI * 2);
+          ctx.fillStyle = g;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, PIECE_R - 4, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 11px system-ui';
+          ctx.textAlign = 'center';
+          ctx.textBaseline = 'middle';
+          ctx.fillText(String((i % 5) + 1), p.x, p.y + 0.5);
+          if (myTeamTurn) {
+            const pulse = 0.45 + Math.sin(performance.now() / 260) * 0.2;
+            ctx.strokeStyle = `rgba(255,213,77,${i === st.sel ? 1 : pulse * 0.5})`;
+            ctx.lineWidth = i === st.sel ? 3.5 : 2;
             ctx.beginPath();
-            ctx.arc(p.x, p.y, PIECE_R + 4, 0, Math.PI * 2);
+            ctx.arc(p.x, p.y, PIECE_R + 5, 0, Math.PI * 2);
             ctx.stroke();
           }
         });
-        drawOrb(ctx, st.ball.x, st.ball.y, BALL_R, '#f6f3e8');
+        // bola de futebol (gomos)
+        const b = st.ball;
+        ctx.beginPath();
+        ctx.ellipse(b.x + 1.5, b.y + 3, BALL_R * 0.95, BALL_R * 0.7, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.28)';
+        ctx.fill();
+        const bg2 = ctx.createRadialGradient(b.x - 3, b.y - 3.5, 1, b.x, b.y, BALL_R + 1);
+        bg2.addColorStop(0, '#ffffff');
+        bg2.addColorStop(0.7, '#eceada');
+        bg2.addColorStop(1, '#b9b49c');
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2);
+        ctx.fillStyle = bg2;
+        ctx.fill();
+        ctx.fillStyle = '#20242c';
+        ctx.beginPath();
+        ctx.arc(b.x, b.y, 2.6, 0, Math.PI * 2);
+        ctx.fill();
+        for (let k = 0; k < 5; k++) {
+          const a = (k / 5) * Math.PI * 2 - Math.PI / 2;
+          ctx.beginPath();
+          ctx.arc(b.x + Math.cos(a) * BALL_R * 0.72, b.y + Math.sin(a) * BALL_R * 0.72, 1.7, 0, Math.PI * 2);
+          ctx.fill();
+        }
         if (myMove() && st.sel !== null && aim) {
           drawAim(ctx, st.pieces[st.sel].x, st.pieces[st.sel].y, aim.current(), PIECE_R);
         }
+        fx.draw(ctx, env.W, env.H);
       },
     };
   },

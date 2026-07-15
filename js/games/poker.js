@@ -2,7 +2,7 @@
 // autoritativo: embaralha, distribui e resolve. As cartas fechadas do
 // convidado viajam por mensagem privada (espectadores não recebem).
 // Termina quando alguém zera as fichas ou após 16 mãos (mais fichas vence).
-import { roundRect } from '../engine.js';
+import { roundRect, shade } from '../engine.js';
 
 const START_CHIPS = 1000;
 const SB = 10;
@@ -280,32 +280,107 @@ export default {
 
     function drawCard(ctx, x, y, card, faceUp) {
       const w = 48, h = 66;
-      roundRect(ctx, x, y, w, h, 6);
+      // sombra da carta
+      ctx.save();
+      ctx.fillStyle = 'rgba(0,0,0,0.35)';
+      roundRect(ctx, x + 2, y + 3, w, h, 6);
+      ctx.fill();
       if (!faceUp) {
-        ctx.fillStyle = '#39518f';
+        const bg = ctx.createLinearGradient(x, y, x + w, y + h);
+        bg.addColorStop(0, '#3e5aa0');
+        bg.addColorStop(1, '#2b3f74');
+        roundRect(ctx, x, y, w, h, 6);
+        ctx.fillStyle = bg;
         ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        ctx.strokeStyle = 'rgba(255,255,255,0.55)';
         ctx.lineWidth = 1.5;
         ctx.stroke();
-        roundRect(ctx, x + 5, y + 5, w - 10, h - 10, 4);
-        ctx.strokeStyle = 'rgba(255,255,255,0.3)';
+        // padrão losango do verso
+        ctx.save();
+        roundRect(ctx, x + 4, y + 4, w - 8, h - 8, 4);
+        ctx.clip();
+        ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+        ctx.lineWidth = 1;
+        for (let d = -h; d < w + h; d += 8) {
+          ctx.beginPath(); ctx.moveTo(x + d, y); ctx.lineTo(x + d + h, y + h); ctx.stroke();
+          ctx.beginPath(); ctx.moveTo(x + d + h, y); ctx.lineTo(x + d, y + h); ctx.stroke();
+        }
+        ctx.restore();
+        roundRect(ctx, x + 4, y + 4, w - 8, h - 8, 4);
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)';
         ctx.stroke();
+        ctx.restore();
         return;
       }
-      ctx.fillStyle = '#f7f4ea';
+      const fg = ctx.createLinearGradient(x, y, x, y + h);
+      fg.addColorStop(0, '#ffffff');
+      fg.addColorStop(1, '#ece7d6');
+      roundRect(ctx, x, y, w, h, 6);
+      ctx.fillStyle = fg;
       ctx.fill();
       ctx.strokeStyle = 'rgba(0,0,0,0.35)';
       ctx.lineWidth = 1.5;
       ctx.stroke();
       const r = rankOf(card);
       const s = suitOf(card);
-      ctx.fillStyle = s === 1 || s === 2 ? '#c22b26' : '#20242c';
-      ctx.font = 'bold 19px system-ui';
+      const color = s === 1 || s === 2 ? '#c22b26' : '#20242c';
+      ctx.fillStyle = color;
+      const rk = RANK_TXT[r] || String(r);
+      // cantos
+      ctx.font = 'bold 12px system-ui';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      ctx.fillText(rk, x + 4, y + 3);
+      ctx.font = '11px system-ui';
+      ctx.fillText(SUITS[s], x + 4, y + 15);
+      ctx.save();
+      ctx.translate(x + w - 4, y + h - 3);
+      ctx.rotate(Math.PI);
+      ctx.font = 'bold 12px system-ui';
+      ctx.fillText(rk, 0, 0);
+      ctx.font = '11px system-ui';
+      ctx.fillText(SUITS[s], 0, 12);
+      ctx.restore();
+      // centro
+      ctx.font = '26px system-ui';
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
-      ctx.fillText(RANK_TXT[r] || String(r), x + w / 2, y + 22);
-      ctx.font = '20px system-ui';
-      ctx.fillText(SUITS[s], x + w / 2, y + 46);
+      ctx.fillText(SUITS[s], x + w / 2, y + h / 2 + 6);
+      ctx.font = 'bold 15px system-ui';
+      ctx.fillText(rk, x + w / 2, y + h / 2 - 14);
+      ctx.restore();
+    }
+
+    // pilha de fichas proporcional às fichas do jogador
+    function drawChips(ctx, x, y, chips) {
+      const denoms = [[500, '#7e3f9d'], [100, '#20242c'], [25, '#2e9d5b'], [5, '#d8342c']];
+      let rest = chips;
+      let col = 0;
+      for (const [val, color] of denoms) {
+        let n = Math.min(6, Math.floor(rest / val));
+        rest -= n * val;
+        if (n <= 0) continue;
+        const cx = x + col * 20;
+        for (let i = 0; i < n; i++) {
+          const cy = y - i * 4;
+          ctx.beginPath();
+          ctx.ellipse(cx, cy, 9, 5.4, 0, 0, Math.PI * 2);
+          ctx.fillStyle = shade(color, -0.3);
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(cx, cy - 1.6, 9, 5.4, 0, 0, Math.PI * 2);
+          ctx.fillStyle = color;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 1.4;
+          ctx.setLineDash([3, 3]);
+          ctx.beginPath();
+          ctx.ellipse(cx, cy - 1.6, 6.4, 3.8, 0, 0, Math.PI * 2);
+          ctx.stroke();
+          ctx.setLineDash([]);
+        }
+        col++;
+      }
     }
 
     return {
@@ -341,30 +416,70 @@ export default {
       tick() {},
       draw(ctx) {
         const v = view;
-        // mesa oval
-        ctx.save();
+        const CXm = env.W / 2;
+        const CYm = env.H / 2 + 10;
+        // ambiente: luz de cima
+        const amb = ctx.createRadialGradient(CXm, CYm - 80, 60, CXm, CYm, 520);
+        amb.addColorStop(0, 'rgba(255,240,200,0.07)');
+        amb.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = amb;
+        ctx.fillRect(0, 0, env.W, env.H);
+        // sombra da mesa
         ctx.beginPath();
-        ctx.ellipse(env.W / 2, env.H / 2 + 10, 400, 210, 0, 0, Math.PI * 2);
-        ctx.fillStyle = '#274e13';
+        ctx.ellipse(CXm + 6, CYm + 16, 408, 214, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.4)';
         ctx.fill();
-        ctx.lineWidth = 14;
-        ctx.strokeStyle = '#5d3a1e';
-        ctx.stroke();
+        // borda de couro acolchoado
+        const leather = ctx.createRadialGradient(CXm, CYm - 120, 60, CXm, CYm, 430);
+        leather.addColorStop(0, '#6b4226');
+        leather.addColorStop(0.8, '#4a2c17');
+        leather.addColorStop(1, '#33200f');
         ctx.beginPath();
-        ctx.ellipse(env.W / 2, env.H / 2 + 10, 360, 175, 0, 0, Math.PI * 2);
-        ctx.strokeStyle = 'rgba(255,255,255,0.12)';
+        ctx.ellipse(CXm, CYm, 404, 212, 0, 0, Math.PI * 2);
+        ctx.fillStyle = leather;
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(255,220,160,0.18)';
         ctx.lineWidth = 2;
         ctx.stroke();
-        ctx.restore();
+        // costura do couro
+        ctx.setLineDash([5, 6]);
+        ctx.strokeStyle = 'rgba(230,190,130,0.3)';
+        ctx.lineWidth = 1.5;
+        ctx.beginPath();
+        ctx.ellipse(CXm, CYm, 384, 194, 0, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // filete dourado + feltro
+        ctx.beginPath();
+        ctx.ellipse(CXm, CYm, 366, 178, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(230,195,120,0.5)';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        const felt = ctx.createRadialGradient(CXm, CYm - 40, 40, CXm, CYm, 380);
+        felt.addColorStop(0, '#2f6b1e');
+        felt.addColorStop(0.7, '#26520f');
+        felt.addColorStop(1, '#1c3d0c');
+        ctx.beginPath();
+        ctx.ellipse(CXm, CYm, 362, 174, 0, 0, Math.PI * 2);
+        ctx.fillStyle = felt;
+        ctx.fill();
+        // arco decorativo do feltro
+        ctx.beginPath();
+        ctx.ellipse(CXm, CYm, 300, 122, 0, 0, Math.PI * 2);
+        ctx.strokeStyle = 'rgba(255,255,255,0.1)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
         if (!v) return;
-        // pote e mão
-        ctx.fillStyle = 'rgba(255,255,255,0.85)';
+        // pote (com pilha de fichas) e mão
+        if (v.pot > 0) drawChips(ctx, env.W / 2 - 34, env.H / 2 - 66, v.pot);
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
         ctx.font = 'bold 17px system-ui';
         ctx.textAlign = 'center';
-        ctx.fillText(`Pote: ${v.pot}`, env.W / 2, env.H / 2 - 62);
-        ctx.fillStyle = 'rgba(255,255,255,0.4)';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(`Pote: ${v.pot}`, env.W / 2 + 34, env.H / 2 - 70);
+        ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.font = '13px system-ui';
-        ctx.fillText(`Mão ${v.hand}/${MAX_HANDS}`, env.W / 2, 74);
+        ctx.fillText(`Mão ${v.hand}/${MAX_HANDS} · blinds ${SB}/${BB}`, env.W / 2, 80);
         // cartas comunitárias
         const cw = 48 + 10;
         const cx0 = env.W / 2 - (cw * 5 - 10) / 2;
@@ -377,10 +492,20 @@ export default {
             ctx.stroke();
           }
         }
-        // cartas dos jogadores
+        // jogadores: cartas, fichas, apostas e destaque de vez
         for (const seat of [0, 1]) {
-          const bx = seat === 0 ? 150 : env.W - 150 - 104;
-          const by = env.H / 2 + 62;
+          const bx = seat === 0 ? 170 : env.W - 170 - 104;
+          const by = env.H / 2 + 56;
+          const cx = bx + 52;
+          const active = v.phase === 'bet' && v.toAct === seat;
+          if (active) {
+            const pulse = 0.4 + Math.sin(performance.now() / 260) * 0.2;
+            ctx.beginPath();
+            ctx.ellipse(cx, by + 34, 92, 70, 0, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(89,255,160,${pulse})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+          }
           let cards = null;
           let up = false;
           if (v.reveal) { cards = v.reveal[seat]; up = true; }
@@ -392,20 +517,46 @@ export default {
             drawCard(ctx, bx, by, 0, false);
             drawCard(ctx, bx + 54, by, 0, false);
           }
-          // dealer/turno
+          // fichas do jogador
+          drawChips(ctx, seat === 0 ? bx - 46 : bx + 128, by + 52, v.chips[seat]);
+          // aposta da rodada em fichas ao lado do centro
+          if (v.roundBet[seat] > 0) {
+            const betX = seat === 0 ? env.W / 2 - 150 : env.W / 2 + 130;
+            drawChips(ctx, betX, env.H / 2 + 26, v.roundBet[seat]);
+            ctx.fillStyle = 'rgba(255,255,255,0.75)';
+            ctx.font = 'bold 12px system-ui';
+            ctx.textAlign = 'center';
+            ctx.fillText(String(v.roundBet[seat]), betX + 10, env.H / 2 + 44);
+          }
+          // botão do dealer
+          if (v.dealer === seat) {
+            const dx = cx + (seat === 0 ? 78 : -78);
+            ctx.beginPath();
+            ctx.arc(dx, by - 4, 11, 0, Math.PI * 2);
+            const dg = ctx.createRadialGradient(dx - 3, by - 8, 1, dx, by - 4, 11);
+            dg.addColorStop(0, '#fff');
+            dg.addColorStop(1, '#cfc7ae');
+            ctx.fillStyle = dg;
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+            ctx.lineWidth = 1.5;
+            ctx.stroke();
+            ctx.fillStyle = '#20242c';
+            ctx.font = 'bold 11px system-ui';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText('D', dx, by - 3.5);
+          }
           ctx.font = 'bold 13px system-ui';
           ctx.textAlign = 'center';
-          if (v.dealer === seat) {
-            ctx.fillStyle = '#ffd54d';
-            ctx.fillText('D', bx + 52, by - 12);
-          }
-          if (v.phase === 'bet' && v.toAct === seat) {
+          ctx.textBaseline = 'middle';
+          if (active) {
             ctx.fillStyle = '#59ffa0';
-            ctx.fillText('● vez', bx + 52, by + 82);
+            ctx.fillText(env.seat === seat ? '● sua vez' : '● pensando…', cx, by + 84);
           }
           if (v.folded === seat) {
             ctx.fillStyle = 'rgba(255,255,255,0.6)';
-            ctx.fillText('desistiu', bx + 52, by + 82);
+            ctx.fillText('desistiu', cx, by + 84);
           }
         }
       },

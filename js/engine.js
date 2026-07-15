@@ -286,23 +286,175 @@ export function shade(hex, f) {
   return `rgb(${r | 0},${g | 0},${b | 0})`;
 }
 
-// bola/círculo com sombreamento
+// bola/círculo com sombreamento pseudo-3D (sombra de contato + corpo + brilho)
 export function drawOrb(ctx, x, y, r, color, alpha = 1) {
   ctx.save();
   ctx.globalAlpha = alpha;
   ctx.beginPath();
-  ctx.ellipse(x + 1.5, y + 2.5, r * 0.95, r * 0.8, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
+  ctx.ellipse(x + r * 0.13, y + r * 0.24, r * 0.95, r * 0.8, 0, 0, Math.PI * 2);
+  ctx.fillStyle = 'rgba(0,0,0,0.28)';
   ctx.fill();
   const g = ctx.createRadialGradient(x - r * 0.4, y - r * 0.45, r * 0.15, x, y, r * 1.08);
   g.addColorStop(0, shade(color, 0.55));
   g.addColorStop(0.5, color);
-  g.addColorStop(1, shade(color, -0.45));
+  g.addColorStop(1, shade(color, -0.5));
   ctx.beginPath();
   ctx.arc(x, y, r, 0, Math.PI * 2);
   ctx.fillStyle = g;
   ctx.fill();
+  const spec = ctx.createRadialGradient(x - r * 0.38, y - r * 0.48, 0.5, x - r * 0.38, y - r * 0.48, r * 0.8);
+  spec.addColorStop(0, 'rgba(255,255,255,0.65)');
+  spec.addColorStop(0.35, 'rgba(255,255,255,0.08)');
+  spec.addColorStop(1, 'rgba(255,255,255,0)');
+  ctx.beginPath();
+  ctx.arc(x, y, r, 0, Math.PI * 2);
+  ctx.fillStyle = spec;
+  ctx.fill();
   ctx.restore();
+}
+
+// Moldura de mesa no padrão da sinuca: madeira envernizada + filete dourado +
+// superfície com vinheta. (px,py,pw,ph) é a área de jogo; rail é a espessura.
+export function drawFrame(ctx, px, py, pw, ph, rail, opts = {}) {
+  const {
+    felt = '#0c6b4a', radius = 22, pad = 12,
+    woodA = '#8a5a2b', woodB = '#54311a', vignette = 0.22,
+  } = opts;
+  const wood = ctx.createLinearGradient(0, py - rail, 0, py + ph + rail);
+  wood.addColorStop(0, woodA);
+  wood.addColorStop(0.5, shade(woodA, -0.25));
+  wood.addColorStop(1, woodB);
+  roundRect(ctx, px - rail, py - rail, pw + rail * 2, ph + rail * 2, radius);
+  ctx.fillStyle = wood;
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255,235,200,0.16)';
+  ctx.lineWidth = 2;
+  roundRect(ctx, px - rail + 1.5, py - rail + 1.5, pw + rail * 2 - 3, ph + rail * 2 - 3, radius - 1);
+  ctx.stroke();
+  ctx.strokeStyle = 'rgba(230,195,120,0.35)';
+  ctx.lineWidth = 1.5;
+  roundRect(ctx, px - pad - 5, py - pad - 5, pw + (pad + 5) * 2, ph + (pad + 5) * 2, 14);
+  ctx.stroke();
+  roundRect(ctx, px - pad, py - pad, pw + pad * 2, ph + pad * 2, 10);
+  ctx.fillStyle = felt;
+  ctx.fill();
+  if (vignette > 0) {
+    const v = ctx.createRadialGradient(px + pw / 2, py + ph / 2, Math.min(pw, ph) * 0.2, px + pw / 2, py + ph / 2, Math.max(pw, ph) * 0.62);
+    v.addColorStop(0, 'rgba(255,255,255,0.05)');
+    v.addColorStop(1, `rgba(0,0,0,${vignette})`);
+    roundRect(ctx, px - pad, py - pad, pw + pad * 2, ph + pad * 2, 10);
+    ctx.fillStyle = v;
+    ctx.fill();
+  }
+}
+
+// Rastro de movimento: guarde as últimas posições e desenhe.
+export class Trail {
+  constructor(max = 10) {
+    this.max = max;
+    this.pts = [];
+  }
+
+  push(x, y) {
+    const last = this.pts[this.pts.length - 1];
+    if (last && Math.hypot(x - last.x, y - last.y) < 2) return;
+    this.pts.push({ x, y });
+    if (this.pts.length > this.max) this.pts.shift();
+  }
+
+  clear() { this.pts.length = 0; }
+
+  draw(ctx, r, color) {
+    for (let i = 0; i < this.pts.length; i++) {
+      const t = (i + 1) / this.pts.length;
+      ctx.beginPath();
+      ctx.arc(this.pts[i].x, this.pts[i].y, r * t * 0.8, 0, Math.PI * 2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = 0.16 * t;
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  }
+}
+
+// Efeitos: textos flutuantes, anéis e explosões de partículas.
+export class Fx {
+  constructor() { this.items = []; }
+
+  text(x, y, str, { color = '#ffd54d', size = 26 } = {}) {
+    this.items.push({ kind: 't', x, y, str, color, size, t: 0, life: 1.1 });
+  }
+
+  ring(x, y, color = '#ffffff', r = 18) {
+    this.items.push({ kind: 'r', x, y, color, r, t: 0, life: 0.45 });
+  }
+
+  burst(x, y, color = '#ffd54d', n = 14, speed = 260) {
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = speed * (0.4 + Math.random() * 0.6);
+      this.items.push({
+        kind: 'p', x, y, vx: Math.cos(a) * s, vy: Math.sin(a) * s - 60,
+        color, t: 0, life: 0.6 + Math.random() * 0.4, size: 2 + Math.random() * 3,
+      });
+    }
+  }
+
+  banner(str, { color = '#ffd54d' } = {}) {
+    this.items.push({ kind: 'b', str, color, t: 0, life: 1.5 });
+  }
+
+  tick(dt) {
+    for (const f of this.items) {
+      f.t += dt;
+      if (f.kind === 'p') {
+        f.vy += 700 * dt;
+        f.x += f.vx * dt;
+        f.y += f.vy * dt;
+      }
+    }
+    this.items = this.items.filter((f) => f.t < f.life);
+  }
+
+  draw(ctx, W, H) {
+    for (const f of this.items) {
+      const k = f.t / f.life;
+      ctx.save();
+      if (f.kind === 't') {
+        ctx.globalAlpha = 1 - k;
+        ctx.fillStyle = f.color;
+        ctx.font = `bold ${f.size}px system-ui`;
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(f.str, f.x, f.y - k * 42);
+      } else if (f.kind === 'r') {
+        ctx.globalAlpha = (1 - k) * 0.8;
+        ctx.strokeStyle = f.color;
+        ctx.lineWidth = 3 * (1 - k);
+        ctx.beginPath();
+        ctx.arc(f.x, f.y, f.r + k * 46, 0, Math.PI * 2);
+        ctx.stroke();
+      } else if (f.kind === 'p') {
+        ctx.globalAlpha = 1 - k;
+        ctx.fillStyle = f.color;
+        ctx.fillRect(f.x - f.size / 2, f.y - f.size / 2, f.size, f.size);
+      } else if (f.kind === 'b') {
+        const pop = Math.min(1, f.t / 0.18);
+        ctx.globalAlpha = Math.min(1, (f.life - f.t) / 0.4);
+        ctx.translate(W / 2, H / 2 - 30);
+        ctx.scale(0.6 + pop * 0.4, 0.6 + pop * 0.4);
+        ctx.font = 'bold 64px system-ui';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.lineWidth = 8;
+        ctx.strokeStyle = 'rgba(0,0,0,0.55)';
+        ctx.strokeText(f.str, 0, 0);
+        ctx.fillStyle = f.color;
+        ctx.fillText(f.str, 0, 0);
+      }
+      ctx.restore();
+    }
+  }
 }
 
 // ---------- Áudio ----------

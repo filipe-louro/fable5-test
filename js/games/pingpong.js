@@ -1,6 +1,6 @@
 // Ping Pong em tempo real: o anfitrião simula a bola e transmite snapshots;
 // cada jogador controla sua raquete (mouse/toque ou teclado) e envia a posição.
-import { clamp, throttler, roundRect } from '../engine.js';
+import { clamp, throttler, roundRect, drawFrame, Trail, Fx, shade } from '../engine.js';
 
 const WIN = 7;
 const PAD_H = 92;
@@ -24,6 +24,14 @@ export default {
     const sendPad = throttler(33);
     const sendSnap = throttler(33);
     const sim = () => env.isLocal || env.isHost;
+    const trail = new Trail(9);
+    const fx = new Fx();
+
+    function pointFx(who) {
+      fx.banner('PONTO!', { color: who === 0 ? '#ff8a5c' : '#59b7ff' });
+      fx.burst(who === 0 ? env.W - 60 : 60, (TOP + BOT) / 2, who === 0 ? '#ff8a5c' : '#59b7ff', 18);
+      trail.clear();
+    }
 
     function serve() {
       st.ball.x = env.W / 2;
@@ -50,6 +58,7 @@ export default {
     function score(who) {
       st.sc[who]++;
       env.sfx('score', 0.8);
+      pointFx(who);
       st.serveTo = 1 - who; // saque para quem perdeu o ponto
       st.pause = 1.0;
       st.ball.vx = 0;
@@ -116,8 +125,10 @@ export default {
           if (env.seat !== 0) st.py[0] = m.p[0];
           if (env.seat !== 1) st.py[1] = m.p[1];
           if (m.sc[0] !== st.sc[0] || m.sc[1] !== st.sc[1]) {
+            const who = m.sc[0] !== st.sc[0] ? 0 : 1;
             st.sc = m.sc.slice();
             env.sfx('score', 0.7);
+            pointFx(who);
             setUi();
           }
         }
@@ -138,7 +149,9 @@ export default {
         if (map[k]) keys[map[k]] = type === 'down';
       },
       tick(dt) {
+        fx.tick(dt);
         if (!st || st.over) return;
+        if (st.pause <= 0) trail.push(st.ball.x, st.ball.y);
         movePaddles(dt);
         if (!sim()) return;
         if (st.pause > 0) {
@@ -177,39 +190,117 @@ export default {
       },
       draw(ctx) {
         if (!st) return;
-        // mesa
-        roundRect(ctx, 30, TOP - 22, env.W - 60, BOT - TOP + 44, 14);
-        ctx.fillStyle = '#155e8a';
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+        drawFrame(ctx, 44, TOP - 8, env.W - 88, BOT - TOP + 16, 34, {
+          felt: '#175f8d', woodA: '#4a5566', woodB: '#262d38', vignette: 0.24,
+        });
+        // superfície da mesa com brilho diagonal
+        const sheen = ctx.createLinearGradient(44, TOP, env.W - 44, BOT);
+        sheen.addColorStop(0, 'rgba(255,255,255,0.07)');
+        sheen.addColorStop(0.45, 'rgba(255,255,255,0)');
+        sheen.addColorStop(0.55, 'rgba(255,255,255,0.05)');
+        sheen.addColorStop(1, 'rgba(255,255,255,0)');
+        ctx.fillStyle = sheen;
+        ctx.fillRect(44, TOP - 8, env.W - 88, BOT - TOP + 16);
+        // linhas oficiais
+        ctx.strokeStyle = 'rgba(255,255,255,0.85)';
         ctx.lineWidth = 3;
-        roundRect(ctx, 38, TOP - 14, env.W - 76, BOT - TOP + 28, 10);
-        ctx.stroke();
-        ctx.setLineDash([10, 12]);
+        ctx.strokeRect(52, TOP, env.W - 104, BOT - TOP);
+        ctx.lineWidth = 1.5;
         ctx.beginPath();
-        ctx.moveTo(env.W / 2, TOP - 14);
-        ctx.lineTo(env.W / 2, BOT + 14);
+        ctx.moveTo(52, (TOP + BOT) / 2);
+        ctx.lineTo(env.W - 52, (TOP + BOT) / 2);
         ctx.stroke();
-        ctx.setLineDash([]);
-        // placar grande
-        ctx.fillStyle = 'rgba(255,255,255,0.18)';
-        ctx.font = 'bold 64px system-ui';
+        // rede com postes e sombra
+        ctx.fillStyle = 'rgba(0,0,0,0.18)';
+        ctx.fillRect(env.W / 2 + 3, TOP - 6, 7, BOT - TOP + 12);
+        ctx.strokeStyle = 'rgba(230,235,245,0.9)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(env.W / 2, TOP - 10);
+        ctx.lineTo(env.W / 2, BOT + 10);
+        ctx.stroke();
+        ctx.strokeStyle = 'rgba(230,235,245,0.35)';
+        ctx.lineWidth = 1;
+        for (let y = TOP - 8; y < BOT + 8; y += 7) {
+          ctx.beginPath();
+          ctx.moveTo(env.W / 2 - 3, y);
+          ctx.lineTo(env.W / 2 + 3, y + 4);
+          ctx.stroke();
+        }
+        for (const py of [TOP - 12, BOT + 12]) {
+          ctx.beginPath();
+          ctx.arc(env.W / 2, py, 4.5, 0, Math.PI * 2);
+          ctx.fillStyle = '#20242c';
+          ctx.fill();
+        }
+        // placar grande na mesa
+        ctx.fillStyle = 'rgba(255,255,255,0.16)';
+        ctx.font = 'bold 72px system-ui';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(String(st.sc[0]), env.W / 2 - 90, TOP + 40);
-        ctx.fillText(String(st.sc[1]), env.W / 2 + 90, TOP + 40);
-        // raquetes
-        ctx.fillStyle = '#ff8a5c';
-        roundRect(ctx, X0 - PAD_W / 2, st.py[0] - PAD_H / 2, PAD_W, PAD_H, 6);
-        ctx.fill();
-        ctx.fillStyle = '#59b7ff';
-        roundRect(ctx, X1 - PAD_W / 2, st.py[1] - PAD_H / 2, PAD_W, PAD_H, 6);
-        ctx.fill();
-        // bola
-        ctx.beginPath();
-        ctx.arc(st.ball.x, st.ball.y, BALL_R, 0, Math.PI * 2);
-        ctx.fillStyle = '#f6f3e8';
-        ctx.fill();
+        ctx.fillText(String(st.sc[0]), env.W / 2 - 110, (TOP + BOT) / 2);
+        ctx.fillText(String(st.sc[1]), env.W / 2 + 110, (TOP + BOT) / 2);
+        // contagem de saque
+        if (st.pause > 0 && !st.over) {
+          ctx.fillStyle = 'rgba(255,255,255,0.6)';
+          ctx.font = 'bold 20px system-ui';
+          ctx.fillText(`Saque de ${env.names[st.serveTo === 0 ? 1 : 0]}…`, env.W / 2, TOP - 28);
+        }
+        // rastro + bola
+        trail.draw(ctx, BALL_R, '#fff3c0');
+        if (st.pause <= 0 || st.over) {
+          ctx.beginPath();
+          ctx.ellipse(st.ball.x + 2, st.ball.y + 4, BALL_R * 0.9, BALL_R * 0.55, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fill();
+          const bg = ctx.createRadialGradient(st.ball.x - 3, st.ball.y - 3, 1, st.ball.x, st.ball.y, BALL_R + 1);
+          bg.addColorStop(0, '#ffffff');
+          bg.addColorStop(0.6, '#f4efdc');
+          bg.addColorStop(1, '#c9c0a0');
+          ctx.beginPath();
+          ctx.arc(st.ball.x, st.ball.y, BALL_R, 0, Math.PI * 2);
+          ctx.fillStyle = bg;
+          ctx.fill();
+        }
+        // raquetes: borracha redonda + cabo
+        const racket = (x, y, color, side) => {
+          const dir = side === 0 ? -1 : 1;
+          ctx.save();
+          ctx.beginPath();
+          ctx.ellipse(x + 3, y + 6, 24, 30, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.25)';
+          ctx.fill();
+          // cabo
+          ctx.rotate(0);
+          const hx = x + dir * 16;
+          const hg = ctx.createLinearGradient(hx, y + 20, hx, y + 52);
+          hg.addColorStop(0, '#d9b47c');
+          hg.addColorStop(1, '#8a5a2b');
+          roundRect(ctx, hx - 6, y + 18, 12, 36, 6);
+          ctx.fillStyle = hg;
+          ctx.fill();
+          // borracha
+          const rg = ctx.createRadialGradient(x - 7, y - 9, 3, x, y, 30);
+          rg.addColorStop(0, shade(color, 0.35));
+          rg.addColorStop(0.75, color);
+          rg.addColorStop(1, shade(color, -0.35));
+          ctx.beginPath();
+          ctx.ellipse(x, y, 22, PAD_H / 2, 0, 0, Math.PI * 2);
+          ctx.fillStyle = rg;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+          ctx.lineWidth = 2;
+          ctx.stroke();
+          ctx.beginPath();
+          ctx.ellipse(x, y, 15, PAD_H / 2 - 8, 0, 0, Math.PI * 2);
+          ctx.strokeStyle = 'rgba(255,255,255,0.22)';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+          ctx.restore();
+        };
+        racket(X0, st.py[0], '#e04a3a', 0);
+        racket(X1, st.py[1], '#2f6fd0', 1);
+        fx.draw(ctx, env.W, env.H);
       },
     };
   },

@@ -1,6 +1,6 @@
 // Air Hockey em tempo real: anfitrião simula o disco; cada jogador arrasta
 // seu malho dentro da própria metade. Primeiro a 5 gols.
-import { clamp, throttler, roundRect, drawOrb, collideBalls } from '../engine.js';
+import { clamp, throttler, roundRect, collideBalls, drawFrame, Trail, Fx, shade } from '../engine.js';
 
 const WIN = 5;
 const PUCK_R = 13;
@@ -21,6 +21,14 @@ export default {
     const sendPos = throttler(33);
     const sendSnap = throttler(33);
     const sim = () => env.isLocal || env.isHost;
+    const trail = new Trail(10);
+    const fx = new Fx();
+
+    function goalFx(who) {
+      fx.banner('GOL!', { color: who === 0 ? '#ff8a5c' : '#59b7ff' });
+      fx.burst(who === 0 ? Rr : L, (T + B) / 2, who === 0 ? '#ff8a5c' : '#59b7ff', 24, 320);
+      trail.clear();
+    }
 
     function setUi() {
       env.setSub(0, `<b class="big-score">${st.sc[0]}</b>`);
@@ -41,6 +49,7 @@ export default {
     function score(who) {
       st.sc[who]++;
       env.sfx('score', 0.9);
+      goalFx(who);
       resetPuck(1 - who);
       setUi();
       if (st.sc[who] >= WIN) {
@@ -92,8 +101,10 @@ export default {
           if (env.seat !== 0) { st.mal[0].x = m.m[0][0]; st.mal[0].y = m.m[0][1]; }
           if (env.seat !== 1) { st.mal[1].x = m.m[1][0]; st.mal[1].y = m.m[1][1]; }
           if (m.sc[0] !== st.sc[0] || m.sc[1] !== st.sc[1]) {
+            const who = m.sc[0] !== st.sc[0] ? 0 : 1;
             st.sc = m.sc.slice();
             env.sfx('score', 0.7);
+            goalFx(who);
             setUi();
           }
         }
@@ -113,7 +124,9 @@ export default {
       },
       key() {},
       tick(dt) {
+        fx.tick(dt);
         if (!st || st.over) return;
+        trail.push(st.puck.x, st.puck.y);
         // velocidade dos malhos por diferença finita
         for (const m of st.mal) {
           m.vx = (m.x - m.px) / Math.max(dt, 0.001);
@@ -163,37 +176,115 @@ export default {
       },
       draw(ctx) {
         if (!st) return;
-        roundRect(ctx, L - 12, T - 12, Rr - L + 24, B - T + 24, 18);
-        ctx.fillStyle = '#e8edf2';
+        drawFrame(ctx, L, T, Rr - L, B - T, 36, {
+          felt: '#e9eef4', woodA: '#5a6b85', woodB: '#2c3546', vignette: 0, pad: 10,
+        });
+        // superfície com brilho de vidro
+        const glass = ctx.createLinearGradient(L, T, Rr, B);
+        glass.addColorStop(0, 'rgba(255,255,255,0.5)');
+        glass.addColorStop(0.35, 'rgba(255,255,255,0)');
+        glass.addColorStop(0.7, 'rgba(160,190,225,0.14)');
+        glass.addColorStop(1, 'rgba(255,255,255,0.25)');
+        roundRect(ctx, L, T, Rr - L, B - T, 8);
+        ctx.fillStyle = glass;
         ctx.fill();
-        roundRect(ctx, L, T, Rr - L, B - T, 12);
-        ctx.fillStyle = '#f7fafc';
+        // furos de ar
+        ctx.fillStyle = 'rgba(90,110,140,0.22)';
+        for (let x = L + 24; x < Rr - 10; x += 38) {
+          for (let y = T + 24; y < B - 10; y += 38) {
+            ctx.beginPath();
+            ctx.arc(x, y, 1.6, 0, Math.PI * 2);
+            ctx.fill();
+          }
+        }
+        // linhas oficiais
+        ctx.strokeStyle = '#d0413a';
+        ctx.lineWidth = 4;
+        ctx.beginPath(); ctx.moveTo(env.W / 2, T); ctx.lineTo(env.W / 2, B); ctx.stroke();
+        ctx.beginPath(); ctx.arc(env.W / 2, (T + B) / 2, 58, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(env.W / 2, (T + B) / 2, 7, 0, Math.PI * 2);
+        ctx.fillStyle = '#d0413a';
         ctx.fill();
-        // linhas
-        ctx.strokeStyle = '#c33';
         ctx.lineWidth = 3;
-        ctx.beginPath();
-        ctx.moveTo(env.W / 2, T);
-        ctx.lineTo(env.W / 2, B);
-        ctx.stroke();
-        ctx.beginPath();
-        ctx.arc(env.W / 2, (T + B) / 2, 55, 0, Math.PI * 2);
-        ctx.stroke();
-        // gols
-        ctx.strokeStyle = '#2a72b5';
-        ctx.lineWidth = 8;
-        ctx.beginPath(); ctx.moveTo(L - 2, GT); ctx.lineTo(L - 2, GB); ctx.stroke();
-        ctx.beginPath(); ctx.moveTo(Rr + 2, GT); ctx.lineTo(Rr + 2, GB); ctx.stroke();
+        for (const gx of [L, Rr]) {
+          ctx.beginPath();
+          ctx.arc(gx, (T + B) / 2, 86, gx === L ? -Math.PI / 2 : Math.PI / 2, gx === L ? Math.PI / 2 : Math.PI * 1.5);
+          ctx.strokeStyle = '#3a78bd';
+          ctx.stroke();
+        }
+        // bocas dos gols com profundidade
+        for (const [gx, dir] of [[L, -1], [Rr, 1]]) {
+          const g = ctx.createLinearGradient(gx, 0, gx + dir * 22, 0);
+          g.addColorStop(0, 'rgba(20,26,36,0.9)');
+          g.addColorStop(1, 'rgba(20,26,36,0.2)');
+          ctx.fillStyle = g;
+          ctx.fillRect(dir === -1 ? gx - 20 : gx, GT, 20, GOAL_H);
+          ctx.strokeStyle = '#2a72b5';
+          ctx.lineWidth = 5;
+          ctx.beginPath();
+          ctx.moveTo(gx + dir * 2, GT - 4);
+          ctx.lineTo(gx + dir * 2, GB + 4);
+          ctx.stroke();
+        }
         // placar
-        ctx.fillStyle = 'rgba(30,40,60,0.25)';
-        ctx.font = 'bold 60px system-ui';
+        ctx.fillStyle = 'rgba(30,40,60,0.18)';
+        ctx.font = 'bold 62px system-ui';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`${st.sc[0]}  ×  ${st.sc[1]}`, env.W / 2, T + 40);
-        // malhos e disco
-        drawOrb(ctx, st.mal[0].x, st.mal[0].y, MAL_R, '#ff8a5c');
-        drawOrb(ctx, st.mal[1].x, st.mal[1].y, MAL_R, '#59b7ff');
-        drawOrb(ctx, st.puck.x, st.puck.y, PUCK_R, '#2b2f38');
+        ctx.fillText(`${st.sc[0]}   ${st.sc[1]}`, env.W / 2, T + 44);
+        // rastro do disco
+        trail.draw(ctx, PUCK_R, '#4a5568');
+        // disco (corpo com espessura)
+        const p = st.puck;
+        ctx.beginPath();
+        ctx.ellipse(p.x + 2, p.y + 4, PUCK_R, PUCK_R * 0.7, 0, 0, Math.PI * 2);
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fill();
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y + 3, PUCK_R, PUCK_R * 0.85, 0, 0, Math.PI * 2);
+        ctx.fillStyle = '#14161c';
+        ctx.fill();
+        const pg = ctx.createRadialGradient(p.x - 4, p.y - 5, 1, p.x, p.y, PUCK_R + 2);
+        pg.addColorStop(0, '#4d5464');
+        pg.addColorStop(0.7, '#262b36');
+        pg.addColorStop(1, '#14161c');
+        ctx.beginPath();
+        ctx.ellipse(p.x, p.y, PUCK_R, PUCK_R * 0.85, 0, 0, Math.PI * 2);
+        ctx.fillStyle = pg;
+        ctx.fill();
+        // malhos: base + pegador com brilho
+        const mallet = (m, color) => {
+          ctx.beginPath();
+          ctx.ellipse(m.x + 3, m.y + 6, MAL_R, MAL_R * 0.72, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.28)';
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(m.x, m.y + 4, MAL_R, MAL_R * 0.85, 0, 0, Math.PI * 2);
+          ctx.fillStyle = shade(color, -0.45);
+          ctx.fill();
+          const bg = ctx.createRadialGradient(m.x - 8, m.y - 8, 2, m.x, m.y, MAL_R + 2);
+          bg.addColorStop(0, shade(color, 0.4));
+          bg.addColorStop(0.75, color);
+          bg.addColorStop(1, shade(color, -0.3));
+          ctx.beginPath();
+          ctx.ellipse(m.x, m.y, MAL_R, MAL_R * 0.85, 0, 0, Math.PI * 2);
+          ctx.fillStyle = bg;
+          ctx.fill();
+          // pegador
+          const kg = ctx.createRadialGradient(m.x - 4, m.y - 8, 1, m.x, m.y - 4, 12);
+          kg.addColorStop(0, shade(color, 0.55));
+          kg.addColorStop(1, shade(color, -0.15));
+          ctx.beginPath();
+          ctx.ellipse(m.x, m.y - 4, 11, 9, 0, 0, Math.PI * 2);
+          ctx.fillStyle = kg;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+          ctx.lineWidth = 1.5;
+          ctx.stroke();
+        };
+        mallet(st.mal[0], '#e04a3a');
+        mallet(st.mal[1], '#2f6fd0');
+        fx.draw(ctx, env.W, env.H);
       },
     };
   },

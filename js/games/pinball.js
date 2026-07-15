@@ -1,6 +1,6 @@
 // Pinball: cada jogador joga 2 bolas (alternando); maior pontuação vence.
 // Flippers: setas ◄ ► (ou A / L), ou toque na metade esquerda/direita.
-import { collideCircleStatic, collideSegment, throttler, roundRect, drawOrb, clamp } from '../engine.js';
+import { collideCircleStatic, collideSegment, throttler, roundRect, clamp, drawFrame, Trail, Fx, shade } from '../engine.js';
 
 const BALLS_EACH = 2;
 const BALL_R = 9;
@@ -38,6 +38,8 @@ export default {
     const sendFrame = throttler(40);
     const controls = (seat) => env.isLocal || env.seat === seat;
     const myBall = () => st && !st.over && controls(st.player) && st.phase === 'play';
+    const trail = new Trail(8);
+    const fx = new Fx();
 
     function setUi() {
       env.setSub(0, `<b class="big-score">${st.score[0]}</b> pts · ${st.ballsUsed[0]}/${BALLS_EACH} bolas`);
@@ -55,6 +57,8 @@ export default {
       st.phase = 'play';
       st.time = 0;
       st.stallT = 0;
+      trail.clear();
+      setUi();
     }
 
     function serialize() {
@@ -73,6 +77,8 @@ export default {
     }
 
     function drainBall() {
+      trail.clear();
+      fx.text(CX, 460, 'Bola perdida!', { color: '#f2a09d', size: 22 });
       st.ballsUsed[st.player]++;
       env.sfx('pocket', 0.8);
       st.ball = null;
@@ -121,6 +127,7 @@ export default {
           st.score[st.player] += 100;
           env.sfx('bumper', 0.9);
           bp.hot = performance.now();
+          fx.text(bp.x, bp.y - 28, '+100', { color: '#ffd54d', size: 20 });
         }
       }
       // guias
@@ -194,7 +201,9 @@ export default {
         if (k === 'ArrowRight' || k === 'l' || k === 'L') setFlip(1, down);
       },
       tick(dt) {
+        fx.tick(dt);
         if (!st) return;
+        if (st.ball && (st.phase === 'play' || st.phase === 'watch')) trail.push(st.ball.x, st.ball.y);
         if (st.phase === 'watch') return; // remoto: flippers vêm nos quadros
         // animação dos flippers
         for (const side of [0, 1]) {
@@ -223,59 +232,145 @@ export default {
       },
       draw(ctx) {
         if (!st) return;
-        // gabinete
-        roundRect(ctx, MX - 14, MY - 14, MW + 28, env.H - MY, 18);
-        ctx.fillStyle = '#3a2a55';
-        ctx.fill();
-        const felt = ctx.createLinearGradient(0, MY, 0, env.H);
-        felt.addColorStop(0, '#241a3d');
-        felt.addColorStop(1, '#171029');
-        roundRect(ctx, MX, MY, MW, env.H - MY - 6, 12);
-        ctx.fillStyle = felt;
-        ctx.fill();
-        ctx.strokeStyle = 'rgba(255,255,255,0.2)';
+        const now = performance.now();
+        // laterais do gabinete fora da máquina
+        for (const [sx, dir] of [[MX - 14, -1], [MX + MW + 14, 1]]) {
+          const g = ctx.createLinearGradient(sx, 0, sx + dir * 60, 0);
+          g.addColorStop(0, 'rgba(90,70,140,0.35)');
+          g.addColorStop(1, 'rgba(90,70,140,0)');
+          ctx.fillStyle = g;
+          ctx.fillRect(dir === -1 ? sx - 60 : sx, MY, 60, env.H - MY);
+        }
+        drawFrame(ctx, MX, MY, MW, env.H - MY - 12, 22, {
+          felt: '#1c142f', woodA: '#584180', woodB: '#2c2048', vignette: 0, pad: 8, radius: 16,
+        });
+        // playfield com nebulosa e estrelas
+        const neb = ctx.createRadialGradient(CX, 200, 30, CX, 260, 420);
+        neb.addColorStop(0, 'rgba(120,80,200,0.28)');
+        neb.addColorStop(0.5, 'rgba(60,40,120,0.12)');
+        neb.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = neb;
+        ctx.fillRect(MX, MY, MW, env.H - MY);
+        for (let i = 0; i < 40; i++) {
+          const sx = MX + ((i * 97) % MW);
+          const sy = MY + ((i * 61) % (env.H - MY - 30));
+          const tw = 0.25 + 0.5 * Math.abs(Math.sin(now / 700 + i));
+          ctx.fillStyle = `rgba(220,220,255,${tw * 0.5})`;
+          ctx.fillRect(sx, sy, 1.6, 1.6);
+        }
+        // trilhos laterais internos (neon)
+        ctx.strokeStyle = 'rgba(150,120,255,0.55)';
         ctx.lineWidth = 3;
-        roundRect(ctx, MX + 6, MY + 6, MW - 12, env.H - MY - 16, 10);
+        roundRect(ctx, MX + 8, MY + 8, MW - 16, env.H - MY - 26, 10);
         ctx.stroke();
-        // bumpers
+        // placar digital no topo
+        roundRect(ctx, CX - 92, MY + 16, 184, 46, 8);
+        ctx.fillStyle = '#0a0714';
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(150,120,255,0.5)';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        ctx.fillStyle = '#ffb64d';
+        ctx.shadowColor = '#ffb64d';
+        ctx.shadowBlur = 12;
+        ctx.font = 'bold 30px "Courier New", monospace';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText(String(st.score[st.player]).padStart(6, '0'), CX, MY + 40);
+        ctx.shadowBlur = 0;
+        // bumpers com anel aceso
         for (const bp of BUMPERS) {
-          const hot = bp.hot && performance.now() - bp.hot < 140;
-          drawOrb(ctx, bp.x, bp.y, bp.r, hot ? '#ffd54d' : '#d8342c');
-          ctx.fillStyle = '#fff';
-          ctx.font = 'bold 11px system-ui';
-          ctx.textAlign = 'center';
-          ctx.textBaseline = 'middle';
-          ctx.fillText('100', bp.x, bp.y);
-        }
-        // guias
-        ctx.strokeStyle = '#8f7bd8';
-        ctx.lineCap = 'round';
-        ctx.lineWidth = 12;
-        for (const [x1, y1, x2, y2] of GUIDES) {
+          const hot = bp.hot && now - bp.hot < 160;
+          const glow = hot ? 1 : 0.35 + 0.15 * Math.sin(now / 500 + bp.x);
           ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
+          ctx.arc(bp.x, bp.y, bp.r + 6, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(255,120,80,${glow * 0.25})`;
+          ctx.fill();
+          ctx.beginPath();
+          ctx.ellipse(bp.x + 2, bp.y + 4, bp.r, bp.r * 0.8, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.35)';
+          ctx.fill();
+          const bg = ctx.createRadialGradient(bp.x - 6, bp.y - 7, 2, bp.x, bp.y, bp.r + 1);
+          bg.addColorStop(0, hot ? '#ffe9a0' : shade('#d8342c', 0.4));
+          bg.addColorStop(0.7, hot ? '#ffd54d' : '#d8342c');
+          bg.addColorStop(1, hot ? '#e0a020' : shade('#d8342c', -0.4));
+          ctx.beginPath();
+          ctx.arc(bp.x, bp.y, bp.r, 0, Math.PI * 2);
+          ctx.fillStyle = bg;
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.55)';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath();
+          ctx.arc(bp.x, bp.y, bp.r - 5, 0, Math.PI * 2);
           ctx.stroke();
+          ctx.fillStyle = '#fff';
+          ctx.font = 'bold 10px system-ui';
+          ctx.fillText('100', bp.x, bp.y + 0.5);
         }
-        // flippers
-        ctx.strokeStyle = '#ffd54d';
-        ctx.lineWidth = 16;
+        // guias com neon
+        for (const [x1, y1, x2, y2] of GUIDES) {
+          ctx.strokeStyle = 'rgba(150,120,255,0.28)';
+          ctx.lineCap = 'round';
+          ctx.lineWidth = 16;
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.strokeStyle = '#a48ef0';
+          ctx.lineWidth = 9;
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+          ctx.lineWidth = 2.5;
+          ctx.beginPath(); ctx.moveTo(x1, y1 - 3); ctx.lineTo(x2, y2 - 3); ctx.stroke();
+        }
+        // flippers metálicos
         for (const side of [0, 1]) {
           const [x1, y1, x2, y2] = flipperEnds(side);
+          ctx.strokeStyle = 'rgba(0,0,0,0.4)';
+          ctx.lineCap = 'round';
+          ctx.lineWidth = 18;
+          ctx.beginPath(); ctx.moveTo(x1 + 2, y1 + 4); ctx.lineTo(x2 + 2, y2 + 4); ctx.stroke();
+          const fg = ctx.createLinearGradient(x1, y1 - 8, x1, y1 + 8);
+          fg.addColorStop(0, '#ffe9a0');
+          fg.addColorStop(0.5, '#ffd54d');
+          fg.addColorStop(1, '#c09020');
+          ctx.strokeStyle = fg;
+          ctx.lineWidth = 15;
+          ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+          ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+          ctx.lineWidth = 3;
+          ctx.beginPath(); ctx.moveTo(x1, y1 - 4); ctx.lineTo(x2, y2 - 4); ctx.stroke();
+          // pivô
           ctx.beginPath();
-          ctx.moveTo(x1, y1);
-          ctx.lineTo(x2, y2);
+          ctx.arc(x1, y1, 6, 0, Math.PI * 2);
+          ctx.fillStyle = '#2c2048';
+          ctx.fill();
+          ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+          ctx.lineWidth = 1.5;
           ctx.stroke();
         }
-        // pontuação no vidro
-        ctx.fillStyle = 'rgba(255,255,255,0.14)';
-        ctx.font = 'bold 40px system-ui';
-        ctx.textAlign = 'center';
-        ctx.fillText(String(st.score[st.player]), CX, MY + 46);
-        // bola
+        // dreno
+        const dg = ctx.createLinearGradient(0, env.H - 40, 0, env.H - 10);
+        dg.addColorStop(0, 'rgba(0,0,0,0)');
+        dg.addColorStop(1, 'rgba(0,0,0,0.8)');
+        ctx.fillStyle = dg;
+        ctx.fillRect(MX + 8, env.H - 40, MW - 16, 30);
+        // rastro + bola cromada
+        trail.draw(ctx, BALL_R, '#c9d4ff');
         if (st.ball && (st.phase === 'play' || st.phase === 'watch')) {
-          drawOrb(ctx, st.ball.x, st.ball.y, BALL_R, '#d9d9e2');
+          const b = st.ball;
+          ctx.beginPath();
+          ctx.ellipse(b.x + 2, b.y + 4, BALL_R * 0.9, BALL_R * 0.6, 0, 0, Math.PI * 2);
+          ctx.fillStyle = 'rgba(0,0,0,0.4)';
+          ctx.fill();
+          const cg = ctx.createRadialGradient(b.x - 3.5, b.y - 4, 0.5, b.x, b.y, BALL_R + 1);
+          cg.addColorStop(0, '#ffffff');
+          cg.addColorStop(0.4, '#c8d0dd');
+          cg.addColorStop(0.75, '#767f8f');
+          cg.addColorStop(1, '#3c4350');
+          ctx.beginPath();
+          ctx.arc(b.x, b.y, BALL_R, 0, Math.PI * 2);
+          ctx.fillStyle = cg;
+          ctx.fill();
         }
+        fx.draw(ctx, env.W, env.H);
       },
     };
   },
