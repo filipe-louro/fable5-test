@@ -1,84 +1,80 @@
-# 🎱 Sinuca Online
+# 🕹️ Hub de Jogos P2P
 
-Jogo de sinuca (bola 8) para **dois jogadores + espectadores**, direto no
-navegador. Um jogador cria uma sala com um código único, envia o link para os
-amigos: o primeiro a entrar joga, os demais assistem em tempo real — sem
-cadastro, sem backend e sem chave de API.
+Hub de jogos para **dois jogadores + espectadores**, direto no navegador. Crie
+uma sala com código único, chame os amigos e escolham juntos: **partida casual**
+(um jogo) ou **torneio** (vários jogos com placar de vitórias). Sem cadastro,
+sem backend e sem chave de API — 100% estático, pronto para a Vercel.
+
+## Os 10 jogos
+
+| Jogo | Estilo | Como vence |
+| --- | --- | --- |
+| 🎱 Sinuca | Física por turnos | Bola 8 (regras completas: grupos, faltas, bola na mão) |
+| ⚽ Futebol de Botão | Física por turnos | Arremesse os 5 jogadores-círculo; primeiro a 3 gols |
+| 🏓 Ping Pong | Tempo real | Primeiro a 7 pontos |
+| 🏒 Air Hockey | Tempo real | Primeiro a 5 gols |
+| 🎳 Boliche | Física por turnos | 5 frames, strike/spare valem bônus |
+| ⛳ Mini-Golf | Física por turnos | 3 buracos, menos tacadas |
+| 🪩 Pinball | Física em turnos | 2 bolas cada, maior pontuação |
+| 🃏 Poker Hold'em | Cartas (só online) | Heads-up, zere as fichas do rival |
+| ⚫ Damas | Tabuleiro | Capture tudo ou trave o rival |
+| ❌ Jogo da Velha | Tabuleiro | Três em linha |
 
 ## Como funciona
 
-- **Site 100% estático** (HTML + CSS + JavaScript puro) — deploy trivial na Vercel.
-- **Multiplayer em tempo real via WebRTC** (biblioteca [PeerJS](https://peerjs.com)):
-  o servidor público do PeerJS só faz o *handshake* inicial; depois a partida
-  trafega direto entre os navegadores (P2P, com o anfitrião como hub).
-- **Sala única por ID**: o anfitrião gera um código de 5 caracteres (ex.: `K7PQ2`)
-  que identifica a sessão. Os amigos entram pelo código ou pelo link
-  `https://seu-projeto.vercel.app/?sala=K7PQ2`. Várias salas podem existir ao
-  mesmo tempo — cada código é uma sessão independente (colisões de código são
-  regeneradas automaticamente).
-- **Espectadores**: quem entrar depois do segundo jogador assiste ao vivo
-  (até 8 por sala), com contagem 👁 no topo. Espectadores recebem tudo:
-  mira, tacadas quadro a quadro, faltas e placar.
-- **Física própria em canvas 2D**: fricção em duas fases (deslizamento →
-  rolagem), colisões com leve efeito tangencial, tabelas com fricção no quique
-  e caçapas com "queixos" reais — a bola pode rateiar na boca e voltar, ou
-  cair naturalmente rolando pela tabela até o canto.
-- **Mira e força**: aponte com o cursor (linha de trajetória + bola fantasma),
-  pressione e **puxe para trás** para dar força — o taco recua e a barra mostra
-  a potência; solte para tacar. Controle fino de qualquer distância.
-- **Regras da bola 8** (simplificadas): quebra, mesa aberta, lisas × listradas,
-  faltas (branca na caçapa, não tocar bola, tocar o grupo errado), bola na mão,
-  vitória/derrota com a bola 8 e revanche com quebra alternada.
-- Também dá para jogar **em dois no mesmo aparelho** (modo local).
+- **Sala primeiro, jogo depois**: o anfitrião cria a sala e, com os dois
+  jogadores no lobby, escolhe o modo e o(s) jogo(s). Espectadores podem entrar
+  a qualquer momento (inclusive no meio da partida) — quem chega depois do
+  segundo jogador assiste automaticamente (até 8 por sala).
+- **Modo casual**: um jogo; ao final dá para jogar de novo (com série de
+  vitórias) ou voltar ao lobby e trocar de jogo.
+- **Modo torneio**: escolha 2+ jogos (a ordem dos cliques define a sequência);
+  cada vitória vale 1 ponto no placar; ao final o hub declara o campeão.
+- **Salas ativas**: a página inicial lista as salas públicas abertas, com
+  filtro por texto (código, anfitrião, jogo) e por situação (com vaga /
+  jogando). A listagem também é P2P: o primeiro visitante online vira o
+  "diretório" da rede e os anfitriões anunciam suas salas nele (com re-eleição
+  automática se ele sair). O anfitrião pode desmarcar a listagem pública.
+- **Rede**: WebRTC via [PeerJS](https://peerjs.com) — o broker público só faz o
+  handshake; o jogo trafega direto entre os navegadores. O anfitrião é o hub da
+  sala: retransmite tudo para os espectadores. Nos jogos por turno, quem joga
+  simula a física e transmite; nos de tempo real (ping pong, air hockey), o
+  anfitrião é autoritativo. No poker, as cartas fechadas viajam por mensagem
+  privada (espectadores não recebem até o showdown).
+- Também dá para jogar **em dois no mesmo aparelho** (modo local; poker é a
+  única exceção, por ter cartas ocultas).
 
 ## Deploy na Vercel
 
 1. Acesse [vercel.com/new](https://vercel.com/new) e importe este repositório.
-2. Framework Preset: **Other** (site estático — sem comando de build, output na raiz).
-3. Clique em **Deploy**. Pronto!
-
-Não há variáveis de ambiente nem dependências para instalar.
-
-## Como jogar
-
-1. Abra o site, digite seu nome e clique em **Criar sala**.
-2. Clique em **Copiar link de convite** e envie para os amigos.
-3. O primeiro a entrar joga contra você (o anfitrião faz a quebra);
-   quem chegar depois assiste como espectador.
-4. **Mira e força**: aponte com o cursor para ver a trajetória; pressione e
-   puxe para trás para carregar o taco (a barra mostra a força); solte para
-   tacar. Soltar sem puxar cancela.
-5. **Bola na mão** (após falta): toque em qualquer ponto livre da mesa para
-   posicionar a branca.
+2. Framework Preset: **Other** (site estático — sem build, output na raiz).
+3. **Deploy**. Não há variáveis de ambiente nem dependências.
 
 ## Estrutura do código
 
 | Arquivo | Responsabilidade |
 | --- | --- |
-| `index.html` | Estrutura da página, menus e HUD |
-| `style.css` | Visual (tema escuro, responsivo, mobile-friendly) |
-| `js/physics.js` | Simulação física: colisões, tabelas, caçapas, previsão de mira |
-| `js/rules.js` | Regras da bola 8: grupos, faltas, turnos, fim de jogo |
-| `js/net.js` | Salas e transporte P2P (PeerJS/WebRTC) |
-| `js/main.js` | Renderização em canvas, entrada (mouse/touch), HUD, sons e orquestração |
+| `index.html` / `style.css` | Menu, lobby, HUD, overlays de placar |
+| `js/main.js` | Hub: sala, lobby, modos, placar de torneio, relay a espectadores |
+| `js/net.js` | Transporte P2P multi-conexão (1 jogador + N espectadores) |
+| `js/dir.js` | Diretório P2P de salas ativas (eleição + heartbeat + listagem) |
+| `js/engine.js` | Física de círculos, mira "pressione e puxe", sons, utilitários |
+| `js/physics.js` / `js/rules.js` | Física e regras específicas da sinuca |
+| `js/games/*.js` | Um módulo por jogo, com interface comum |
 
-### Modelo de rede
+### Interface de um jogo
 
-Quem está na vez simula a tacada localmente e transmite a posição das bolas
-~25×/segundo; ao final da jogada envia o estado completo (autoritativo), que
-inclui turnos, faltas e placar. Isso evita problemas de sincronização de
-física entre navegadores diferentes. O anfitrião atua como hub: retransmite a
-partida para os espectadores, que podem entrar a qualquer momento e recebem o
-estado atual na chegada.
+Cada jogo exporta `{ id, name, icon, desc, local, create(env) }`, e a instância
+implementa `start / snapshot / restore / msg / pointer / key / tick / draw`.
+O `env` fornece assento, nomes, envio de mensagens (com variante privada),
+HUD (mensagem, dica, sublinha por jogador, botões de ação) e `finish(vencedor,
+texto)` — o hub cuida do placar, do interstitial e do torneio.
 
 ## Rodando localmente
 
-Qualquer servidor estático funciona:
-
 ```bash
-npx serve .
-# ou
 python3 -m http.server 8000
+# ou: npx serve .
 ```
 
-Abra duas janelas do navegador para testar o multiplayer (ou use o modo local).
+Abra várias janelas para simular jogadores e espectadores (ou use o modo local).

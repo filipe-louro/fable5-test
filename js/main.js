@@ -1,244 +1,203 @@
-import {
-  W, H, RAIL, R, POCKETS, TOP_SEGS, LEFT_SEGS, MAX_SHOT_SPEED,
-  step, allStopped, predictShot, validCuePosition,
-} from './physics.js';
-import {
-  makeInitialState, evaluateShot, serializeState, deserializeState, isSolid,
-} from './rules.js';
+// Hub de Jogos P2P: sala → lobby (escolha de modo e jogos) → partidas com
+// placar. O anfitrião é o hub da sala: retransmite mensagens de jogo para os
+// espectadores e arbitra o fluxo de partidas do torneio.
 import { Net, makeRoomCode } from './net.js';
+import { Directory } from './dir.js';
+import { GAMES, gameById } from './games/index.js';
+import { ensureAudio, sfx } from './engine.js';
 
-const TW = W + RAIL * 2;
-const TH = H + RAIL * 2;
-const PULL_RANGE = 220; // px de puxada para força máxima
+const CW = 968;
+const CH = 528;
 const MAX_SPECTATORS = 8;
-
-const COLORS = {
-  1: '#f6c445', 2: '#2f6fd0', 3: '#d8342c', 4: '#7e3f9d',
-  5: '#ef7d20', 6: '#2e9d5b', 7: '#8d3b2f', 8: '#20242c',
-};
-const ballColor = (id) => COLORS[id > 8 ? id - 8 : id];
-
-function shade(hex, f) {
-  const n = parseInt(hex.slice(1), 16);
-  let r = (n >> 16) & 255;
-  let g = (n >> 8) & 255;
-  let b = n & 255;
-  if (f >= 0) {
-    r += (255 - r) * f;
-    g += (255 - g) * f;
-    b += (255 - b) * f;
-  } else {
-    r *= 1 + f;
-    g *= 1 + f;
-    b *= 1 + f;
-  }
-  return `rgb(${r | 0},${g | 0},${b | 0})`;
-}
 
 // ---------- DOM ----------
 const $ = (id) => document.getElementById(id);
 const canvas = $('table');
 const ctx = canvas.getContext('2d');
 const els = {
-  menu: $('menu'), panelMain: $('panel-main'), panelWait: $('panel-wait'),
+  menu: $('menu'),
   name: $('inp-name'), code: $('inp-code'), status: $('net-status'),
-  waitCode: $('wait-code'), waitStatus: $('wait-status'),
-  hud: $('hud'), msg: $('msg'), hint: $('hint'),
-  roomChip: $('room-chip'), roomCode: $('room-code'),
-  specChip: $('spec-chip'), specN: $('spec-n'),
-  end: $('end'), endMsg: $('end-msg'), btnRematch: $('btn-rematch'),
+  roomsList: $('rooms-list'), roomsFilter: $('rooms-filter'), roomsStatus: $('rooms-status'), roomsKind: $('rooms-kind'),
+  lobby: $('lobby'), lobbyCode: $('lobby-code'), lobbyPlayers: $('lobby-players'), lobbySpec: $('lobby-spec'),
+  gamesGrid: $('games-grid'), btnStart: $('btn-start'), lobbyHint: $('lobby-hint'), chkPublic: $('chk-public'),
+  modeBtns: [$('btn-mode-casual'), $('btn-mode-torneio')],
+  game: $('game'), hud: $('hud'), msg: $('msg'), hint: $('hint'), tourney: $('tourney'), actions: $('actions'),
+  roomChip: $('room-chip'), roomCode: $('room-code'), specChip: $('spec-chip'), specN: $('spec-n'),
+  inter: $('inter'), interTitle: $('inter-title'), interBoard: $('inter-board'), interBtns: $('inter-btns'),
+  final: $('final'), finalTitle: $('final-title'), finalBoard: $('final-board'), finalBtns: $('final-btns'),
+  end: $('end'), endMsg: $('end-msg'),
   toast: $('toast'),
   cards: [
-    { root: $('card-0'), name: $('name-0'), group: $('group-0'), balls: $('balls-0') },
-    { root: $('card-1'), name: $('name-1'), group: $('group-1'), balls: $('balls-1') },
+    { root: $('card-0'), name: $('name-0'), sub: $('sub-0') },
+    { root: $('card-1'), name: $('name-1'), sub: $('sub-1') },
   ],
 };
 
-// ---------- Estado da aplicação ----------
+// ---------- Estado ----------
 let mode = 'menu'; // menu | local | host | guest | spectator
-let mySeat = 0; // -1 para espectador
+let mySeat = 0;
 let names = ['Jogador 1', 'Jogador 2'];
-let state = makeInitialState(0, names);
 let net = null;
 let roomCode = '';
-let gameStarted = false;
+let inRoom = false;
+let phase = 'lobby'; // lobby | playing | inter | final
+let cfg = { mode: 'casual', games: ['sinuca'] };
+let board = []; // [{game, winner, line}]
+let matchIdx = 0;
+let currentGameId = null;
+let inst = null;
+let instAlive = null; // {ok:true} da instância atual
 
-// anfitrião: papéis das conexões
 let playerConnId = null;
 const spectatorIds = new Set();
 let specCount = 0;
+let directory = null;
+let roomsTimer = null;
 
-let shooting = false; // eu estou simulando uma tacada
-let remoteShooting = false; // o jogador remoto está simulando
-let shotSeat = 0;
-let ev = null; // eventos da tacada em curso
+const isHostLike = () => mode === 'host' || mode === 'local';
 
-let pointer = { x: -999, y: -999, inside: false, down: false };
-// mira: hover segue o cursor; ao pressionar trava a direção e a puxada dá a força
-let aim = { charging: false, dirX: 1, dirY: 0, pressX: 0, pressY: 0, power: 0 };
-let remoteAim = null; // {dx, dy, pow, ch}
-let ghostCue = null; // prévia da bola na mão (local ou remota)
-const sinkAnims = new Map(); // id -> {x0,y0,px,py,t0}
-let lastAimSent = 0;
-let lastFrameSent = 0;
+// ---------- Utilidades de UI ----------
+function toast(text) {
+  els.toast.textContent = text;
+  els.toast.classList.add('show');
+  clearTimeout(toast._t);
+  toast._t = setTimeout(() => els.toast.classList.remove('show'), 2400);
+}
 
-const myTurn = () =>
-  !state.over && gameStarted && mode !== 'spectator' && (mode === 'local' || state.turn === mySeat);
-const canAim = () =>
-  myTurn() && !shooting && !remoteShooting && !state.ballInHand && !state.balls[0].pocketed;
+function myName() {
+  return els.name.value.trim().slice(0, 14) || 'Jogador';
+}
 
-// ---------- Áudio ----------
-let audioCtx = null;
-function ensureAudio() {
-  if (!audioCtx) {
-    const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) audioCtx = new AC();
+function setStatus(kind, text) {
+  els.status.textContent = text || '';
+  els.status.className = kind || '';
+}
+
+function show(section) {
+  // section: 'menu' | 'lobby' | 'game'
+  els.menu.classList.toggle('hidden', section !== 'menu');
+  els.lobby.classList.toggle('hidden', section !== 'lobby');
+  els.game.classList.toggle('hidden', section !== 'game');
+  document.body.classList.toggle('in-game', section === 'game');
+}
+
+function inviteLink() {
+  return `${location.origin}${location.pathname}?sala=${roomCode}`;
+}
+
+// ---------- Diretório de salas ----------
+function ensureDirectory() {
+  if (!directory) directory = new Directory();
+  return directory;
+}
+
+function announceRoom() {
+  if (mode !== 'host' || !inRoom) return;
+  const d = ensureDirectory();
+  if (!els.chkPublic.checked) {
+    d.unannounce();
+    return;
   }
-  if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
-}
-function sfx(kind, vol = 1) {
-  if (!audioCtx || audioCtx.state !== 'running') return;
-  const t = audioCtx.currentTime;
-  const g = audioCtx.createGain();
-  g.connect(audioCtx.destination);
-  const o = audioCtx.createOscillator();
-  o.connect(g);
-  if (kind === 'click') {
-    o.type = 'triangle';
-    o.frequency.value = 700 + Math.random() * 350;
-    g.gain.setValueAtTime(0.22 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
-    o.start(t); o.stop(t + 0.07);
-  } else if (kind === 'cushion') {
-    o.type = 'sine';
-    o.frequency.value = 150;
-    g.gain.setValueAtTime(0.18 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
-    o.start(t); o.stop(t + 0.1);
-  } else if (kind === 'pocket') {
-    o.type = 'sine';
-    o.frequency.setValueAtTime(430, t);
-    o.frequency.exponentialRampToValueAtTime(85, t + 0.16);
-    g.gain.setValueAtTime(0.3 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
-    o.start(t); o.stop(t + 0.2);
-  }
-}
-function drainShotEvents() {
-  if (!ev) return;
-  let played = 0;
-  for (const s of ev.sounds) {
-    if (played++ >= 3) break;
-    sfx(s.kind, s.vol);
-  }
-  ev.sounds.length = 0;
-  for (const s of ev.sunk) {
-    sinkAnims.set(s.id, { x0: s.x, y0: s.y, px: s.px, py: s.py, t0: performance.now() });
-  }
-  ev.sunk.length = 0;
-}
-
-function nearestPocketTo(x, y) {
-  let best = POCKETS[0];
-  let bd = Infinity;
-  for (const p of POCKETS) {
-    const d = Math.hypot(x - p.x, y - p.y);
-    if (d < bd) { bd = d; best = p; }
-  }
-  return best;
-}
-
-// ---------- Ciclo da tacada ----------
-function shoot(dirX, dirY, power) {
-  const cue = state.balls[0];
-  const speed = 150 + power * (MAX_SHOT_SPEED - 150);
-  cue.vx = dirX * speed;
-  cue.vy = dirY * speed;
-  shotSeat = state.turn;
-  ev = { firstHit: null, pocketed: [], sunk: [], sounds: [] };
-  shooting = true;
-  remoteAim = null;
-  sfx('click', 0.4 + power * 0.6);
-}
-
-function finishShot() {
-  shooting = false;
-  sendFrame(true);
-  evaluateShot(state, shotSeat, ev, names);
-  ev = null;
-  broadcast({ t: 'e', s: serializeState(state) });
-  updateHud();
-  if (state.over) showEnd(state.msg);
-}
-
-function sendFrame(force) {
-  if (!net || !net.connected) return;
-  const now = performance.now();
-  if (!force && now - lastFrameSent < 40) return;
-  lastFrameSent = now;
-  broadcast({
-    t: 'f',
-    b: state.balls.map((b) => [
-      Math.round(b.x * 10) / 10,
-      Math.round(b.y * 10) / 10,
-      b.pocketed ? 1 : 0,
-    ]),
+  const gameName = cfg.mode === 'torneio'
+    ? `Torneio (${cfg.games.length} jogos)`
+    : (gameById(cfg.games[0])?.name || 'A escolher');
+  d.announce({
+    code: roomCode,
+    host: names[0],
+    mode: cfg.mode,
+    game: gameName,
+    players: playerConnId !== null ? 2 : 1,
+    spec: specCount,
+    status: phase === 'lobby' ? 'lobby' : 'playing',
   });
 }
 
-// envia mensagem de jogo para todos os interessados
-function broadcast(msg) {
-  if (net && net.connected) net.send(msg);
+function refreshRooms() {
+  const d = ensureDirectory();
+  els.roomsStatus.textContent = 'Procurando salas…';
+  d.list((rooms, err) => {
+    if (mode !== 'menu') return;
+    if (err || rooms === null) {
+      els.roomsStatus.textContent = err || 'Sem resposta.';
+      return;
+    }
+    renderRooms(rooms);
+  });
 }
 
-function sendAim(force) {
-  if (!net || !net.connected || !canAim()) return;
-  const now = performance.now();
-  if (!force && now - lastAimSent < 50) return;
-  lastAimSent = now;
-  const cue = state.balls[0];
-  let dx;
-  let dy;
-  if (aim.charging) {
-    dx = aim.dirX;
-    dy = aim.dirY;
-  } else {
-    const vx = pointer.x - cue.x;
-    const vy = pointer.y - cue.y;
-    const d = Math.hypot(vx, vy);
-    if (d < 4 || !pointer.inside) return;
-    dx = vx / d;
-    dy = vy / d;
+let lastRooms = [];
+function renderRooms(rooms) {
+  if (rooms) lastRooms = rooms;
+  const q = els.roomsFilter.value.trim().toLowerCase();
+  const kind = els.roomsKind.value;
+  const list = lastRooms.filter((r) => {
+    if (kind === 'lobby' && (r.status !== 'lobby' || r.players >= 2)) return false;
+    if (kind === 'playing' && r.status !== 'playing') return false;
+    if (!q) return true;
+    return `${r.code} ${r.host} ${r.game} ${r.mode}`.toLowerCase().includes(q);
+  });
+  els.roomsStatus.textContent = list.length
+    ? `${list.length} sala(s) encontrada(s)`
+    : lastRooms.length ? 'Nenhuma sala bate com o filtro.' : 'Nenhuma sala ativa agora. Crie a primeira!';
+  els.roomsList.innerHTML = '';
+  for (const r of list) {
+    const row = document.createElement('div');
+    row.className = 'room-row';
+    const vaga = r.players < 2;
+    row.innerHTML = `
+      <div class="room-info">
+        <b>${esc(r.code)}</b> · ${esc(r.host)}
+        <span class="muted">${r.mode === 'torneio' ? '🏆 Torneio' : '🎲 Casual'} · ${esc(r.game)}
+        · ${r.players}/2${r.spec ? ` · 👁 ${r.spec}` : ''} · ${r.status === 'lobby' ? 'no lobby' : 'jogando'}</span>
+      </div>
+      <button class="small ${vaga ? 'primary' : ''}">${vaga ? 'Entrar' : 'Assistir'}</button>`;
+    row.querySelector('button').addEventListener('click', () => {
+      els.code.value = r.code;
+      joinRoom(r.code);
+    });
+    els.roomsList.appendChild(row);
   }
-  broadcast({ t: 'a', dx, dy, pow: aim.charging ? aim.power : 0, ch: aim.charging ? 1 : 0 });
+}
+
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 // ---------- Rede ----------
 function makeNet() {
   return new Net({
     onMessage: handleMessage,
-    onOpen: (connId) => {
+    onOpen: () => {
       if (mode === 'guest') net.send({ t: 'hello', name: names[1] });
-      void connId;
     },
     onConnClose: (connId) => {
       if (mode === 'host') {
-        if (connId === playerConnId && gameStarted) {
-          showEnd('O outro jogador saiu da partida.', true);
+        if (connId === playerConnId) {
+          playerConnId = null;
+          if (inRoom) {
+            if (phase === 'lobby') {
+              names[1] = 'Jogador 2';
+              renderLobby();
+              toast('O jogador saiu da sala.');
+              announceRoom();
+            } else {
+              showEnd('O outro jogador saiu da partida.');
+            }
+          }
         } else if (spectatorIds.delete(connId)) {
           setSpectators(spectatorIds.size);
         }
-      } else if (gameStarted) {
-        showEnd(mode === 'spectator' ? 'A transmissão terminou.' : 'O outro jogador saiu da partida.', true);
+      } else if (inRoom) {
+        showEnd(mode === 'spectator' ? 'A sala foi encerrada.' : 'A conexão com a sala caiu.');
       } else if (mode === 'guest') {
         setStatus('error', 'Não foi possível entrar na sala.');
-        showPanel('main');
+        mode = 'menu';
       }
     },
     onStatus: setStatus,
     onCodeChange: (fresh) => {
       roomCode = fresh;
-      els.waitCode.textContent = fresh;
+      els.lobbyCode.textContent = fresh;
       els.roomCode.textContent = fresh;
     },
   });
@@ -246,13 +205,36 @@ function makeNet() {
 
 function setSpectators(n) {
   specCount = n;
-  updateSpecChip();
-  if (mode === 'host') broadcast({ t: 'spec', n });
+  updateSpecUi();
+  if (mode === 'host') {
+    broadcast({ t: 'spec', n });
+    announceRoom();
+  }
 }
 
-function updateSpecChip() {
+function updateSpecUi() {
   els.specChip.classList.toggle('hidden', specCount <= 0);
   els.specN.textContent = specCount;
+  els.lobbySpec.textContent = specCount > 0 ? `👁 ${specCount} espectador(es)` : '';
+}
+
+function broadcast(msg) {
+  if (net && net.connected) net.send(msg);
+}
+
+function welcomePayload(role) {
+  return {
+    t: 'welcome',
+    role,
+    n: names,
+    spec: specCount,
+    phase,
+    cfg,
+    board,
+    idx: matchIdx,
+    game: currentGameId,
+    gsnap: phase === 'playing' && inst && inst.snapshot ? inst.snapshot() : null,
+  };
 }
 
 function handleMessage(m, connId) {
@@ -264,15 +246,17 @@ function handleMessage(m, connId) {
 function handleHostMessage(m, connId) {
   if (m.t === 'hello') {
     const name = String(m.name || '').slice(0, 14);
-    if (playerConnId === null && !gameStarted) {
+    if (playerConnId === null && phase === 'lobby') {
       playerConnId = connId;
       names[1] = name || 'Jogador 2';
-      state = makeInitialState(0, names);
-      net.sendTo(connId, { t: 'welcome', role: 'player', n: names, s: serializeState(state), spec: specCount });
-      startGame();
+      net.sendTo(connId, welcomePayload('player'));
+      renderLobby();
+      toast(`${names[1]} entrou na sala!`);
+      sfx('score', 0.5);
+      announceRoom();
     } else if (spectatorIds.size < MAX_SPECTATORS) {
       spectatorIds.add(connId);
-      net.sendTo(connId, { t: 'welcome', role: 'spectator', n: names, s: serializeState(state), spec: spectatorIds.size });
+      net.sendTo(connId, welcomePayload('spectator'));
       setSpectators(spectatorIds.size);
       toast(`${name || 'Alguém'} entrou para assistir 👁`);
     } else {
@@ -286,810 +270,588 @@ function handleHostMessage(m, connId) {
       net.closeConn(connId);
       setSpectators(spectatorIds.size);
     }
-    return; // espectadores não interferem no jogo
-  }
-  if (m.t === 'bye') {
-    showEnd('O outro jogador saiu da partida.', true);
     return;
   }
-  if (m.t === 'wr') {
-    doRematch();
-    return;
+  // mensagens do jogador
+  switch (m.t) {
+    case 'bye':
+      playerConnId = null;
+      if (phase === 'lobby') {
+        names[1] = 'Jogador 2';
+        renderLobby();
+        toast('O jogador saiu da sala.');
+        announceRoom();
+      } else {
+        showEnd('O outro jogador saiu da partida.');
+      }
+      break;
+    case 'g':
+      net.sendExcept(connId, m); // repassa aos espectadores
+      if (inst && phase !== 'lobby') inst.msg(m.p);
+      break;
+    case 'gres':
+      applyResult(m.idx, m.winner, m.line);
+      break;
   }
-  // repassa a transmissão do jogador para os espectadores
-  if (m.t === 'f' || m.t === 'e' || m.t === 'a' || m.t === 'ph' || m.t === 'pf') {
-    net.sendExcept(connId, m);
-  }
-  applyGameMessage(m);
 }
 
 function handleClientMessage(m) {
   switch (m.t) {
     case 'welcome':
       names = m.n;
-      state = deserializeState(m.s);
       specCount = m.spec || 0;
+      cfg = m.cfg;
+      board = m.board || [];
       if (m.role === 'spectator') {
         mode = 'spectator';
         mySeat = -1;
       }
-      startGame();
-      updateSpecChip();
-      if (mode === 'spectator') toast('Partida em andamento — você está assistindo 👁');
+      inRoom = true;
+      enterRoomUi();
+      if (m.phase === 'playing' && m.game) {
+        startMatch(m.idx, m.game, m.gsnap);
+      } else if (m.phase === 'inter') {
+        matchIdx = m.idx;
+        currentGameId = m.game;
+        showInter();
+      } else if (m.phase === 'final') {
+        showFinal();
+      } else {
+        showLobby();
+      }
+      if (mode === 'spectator') toast('Você entrou como espectador 👁');
+      updateSpecUi();
       break;
     case 'full':
-      setStatus('error', 'Sala cheia (jogo + espectadores). Tente mais tarde.');
+      setStatus('error', 'Sala cheia (jogo + espectadores). Tente outra.');
       if (net) net.close();
       net = null;
       mode = 'menu';
-      showPanel('main');
       break;
     case 'spec':
       specCount = m.n;
-      updateSpecChip();
+      updateSpecUi();
       break;
-    case 'r': // anfitrião reiniciou
-      state = deserializeState(m.s);
-      remoteShooting = false;
-      ghostCue = null;
-      remoteAim = null;
-      sinkAnims.clear();
-      hideEnd();
-      updateHud();
+    case 'cfg':
+      cfg = m.cfg;
+      if (phase === 'lobby') renderLobby();
+      break;
+    case 'ms':
+      startMatch(m.idx, m.game, null);
+      break;
+    case 'g':
+      if (inst && phase !== 'lobby') inst.msg(m.p);
+      break;
+    case 'gend':
+      board[m.idx] = { game: currentGameId, winner: m.winner, line: m.line };
+      phase = 'inter';
+      showInter();
+      break;
+    case 'final':
+      showFinal();
+      break;
+    case 'lobby':
+      backToLobby();
       break;
     case 'bye':
-      showEnd(mode === 'spectator' ? 'A transmissão terminou.' : 'O outro jogador saiu da partida.', true);
+      showEnd(mode === 'spectator' ? 'A sala foi encerrada.' : 'O outro jogador saiu da partida.');
       break;
-    default:
-      applyGameMessage(m);
   }
 }
 
-// mensagens de jogo comuns a convidado, espectador e anfitrião
-function applyGameMessage(m) {
-  switch (m.t) {
-    case 'a': // prévia de mira do jogador remoto
-      remoteAim = m.off ? null : { dx: m.dx, dy: m.dy, pow: m.pow || 0, ch: !!m.ch };
-      break;
-    case 'f': { // quadro de animação da tacada remota
-      remoteShooting = true;
-      remoteAim = null;
-      for (let i = 0; i < m.b.length && i < state.balls.length; i++) {
-        const b = state.balls[i];
-        const [x, y, p] = m.b[i];
-        if (p && !b.pocketed) {
-          b.pocketed = true;
-          const pk = nearestPocketTo(b.x, b.y);
-          sinkAnims.set(b.id, { x0: b.x, y0: b.y, px: pk.x, py: pk.y, t0: performance.now() });
-          sfx('pocket', 1);
-        }
-        b.x = x; b.y = y;
-      }
-      break;
-    }
-    case 'e': // estado autoritativo ao fim da tacada
-      remoteShooting = false;
-      state = deserializeState(m.s);
-      remoteAim = null;
-      ghostCue = null;
-      updateHud();
-      if (state.over) showEnd(state.msg);
-      break;
-    case 'ph': // prévia da bola na mão
-      ghostCue = { x: m.x, y: m.y, valid: true, remote: true };
-      break;
-    case 'pf': { // bola na mão posicionada
-      const cue = state.balls[0];
-      cue.pocketed = false;
-      cue.x = m.x; cue.y = m.y;
-      cue.vx = 0; cue.vy = 0;
-      state.ballInHand = false;
-      ghostCue = null;
-      updateHud();
-      break;
-    }
-  }
-}
-
-// ---------- Fluxo de telas ----------
-function setStatus(kind, text) {
-  els.status.textContent = text;
-  els.status.className = kind;
-  els.waitStatus.textContent = text;
-}
-
-function showPanel(which) {
-  els.panelMain.classList.toggle('hidden', which !== 'main');
-  els.panelWait.classList.toggle('hidden', which !== 'wait');
-}
-
-function inviteLink() {
-  return `${location.origin}${location.pathname}?sala=${roomCode}`;
-}
-
-function toast(text) {
-  els.toast.textContent = text;
-  els.toast.classList.add('show');
-  clearTimeout(toast._t);
-  toast._t = setTimeout(() => els.toast.classList.remove('show'), 2200);
-}
-
-function myName() {
-  return els.name.value.trim().slice(0, 14) || 'Jogador';
-}
-
-function startGame() {
-  gameStarted = true;
-  els.menu.classList.add('hidden');
-  els.end.classList.add('hidden');
-  els.hud.classList.remove('hidden');
-  document.body.classList.add('in-game');
-  if (mode !== 'local') {
-    els.roomChip.classList.remove('hidden');
-    els.roomCode.textContent = roomCode;
-  }
-  updateHud();
-}
-
-function showEnd(text, disconnected = false) {
-  els.endMsg.textContent = text;
-  els.btnRematch.classList.toggle('hidden', !!disconnected || mode === 'spectator');
-  els.btnRematch.disabled = false;
-  els.btnRematch.textContent = 'Revanche';
-  els.end.classList.remove('hidden');
-  if (disconnected && net) {
-    net.close();
-    gameStarted = false;
-  }
-}
-
-function hideEnd() {
-  els.end.classList.add('hidden');
-}
-
-function doRematch() {
-  const nextBreaker = 1 - state.breaker;
-  state = makeInitialState(nextBreaker, names);
-  shooting = false;
-  remoteShooting = false;
-  ghostCue = null;
-  remoteAim = null;
-  ev = null;
-  sinkAnims.clear();
-  if (mode === 'host') broadcast({ t: 'r', s: serializeState(state) });
-  hideEnd();
-  updateHud();
-}
-
-// ---------- HUD ----------
-function groupLabel(g) {
-  if (g === 'solid') return 'Lisas (1–7)';
-  if (g === 'stripe') return 'Listradas (9–15)';
-  return 'Grupo em aberto';
-}
-
-function miniBallsHtml(seat) {
-  const g = state.groups[seat];
-  if (!g) return '';
-  const test = g === 'solid' ? isSolid : (id) => id >= 9 && id <= 15;
-  const left = state.balls.filter((b) => !b.pocketed && test(b.id));
-  if (left.length === 0) {
-    return '<span class="mini eight">8</span>';
-  }
-  return left
-    .map((b) => {
-      const c = ballColor(b.id);
-      const style =
-        g === 'stripe'
-          ? `background:linear-gradient(180deg,#fff 0 22%,${c} 22% 78%,#fff 78%)`
-          : `background:${c}`;
-      return `<span class="mini" style="${style}"></span>`;
-    })
-    .join('');
-}
-
-function updateHud() {
-  for (const seat of [0, 1]) {
-    const c = els.cards[seat];
-    c.name.textContent = names[seat] + (mode !== 'local' && seat === mySeat ? ' (você)' : '');
-    c.group.textContent = state.over ? '' : groupLabel(state.groups[seat]);
-    c.balls.innerHTML = miniBallsHtml(seat);
-    c.root.classList.toggle('active', !state.over && state.turn === seat);
-  }
-  els.msg.textContent = state.msg || '';
-  let hint = '';
-  if (!state.over) {
-    if (mode === 'spectator') {
-      hint = `👁 Você está assistindo. ${names[state.turn]} joga.`;
-    } else if (state.ballInHand && myTurn()) {
-      hint = 'Bola na mão: toque na mesa para posicionar a branca.';
-    } else if (myTurn() && !shooting && !remoteShooting) {
-      hint = 'Mire com o cursor, pressione e puxe para trás para dar força; solte para tacar.';
-    } else if (!myTurn() && mode !== 'local') {
-      hint = `Aguardando ${names[state.turn]}…`;
-    }
-  }
-  els.hint.textContent = hint;
-}
-
-// ---------- Entrada ----------
-function toPlay(e) {
-  const rect = canvas.getBoundingClientRect();
-  return {
-    x: ((e.clientX - rect.left) * TW) / rect.width - RAIL,
-    y: ((e.clientY - rect.top) * TH) / rect.height - RAIL,
-  };
-}
-
-canvas.addEventListener('pointermove', (e) => {
-  const p = toPlay(e);
-  pointer.x = p.x;
-  pointer.y = p.y;
-  pointer.inside = true;
-  if (state.ballInHand && myTurn()) {
-    ghostCue = { x: p.x, y: p.y, valid: validCuePosition(state.balls, p.x, p.y), remote: false };
-    if (net && net.connected) {
-      const now = performance.now();
-      if (now - lastAimSent > 60) {
-        lastAimSent = now;
-        broadcast({ t: 'ph', x: p.x, y: p.y });
-      }
-    }
-    return;
-  }
-  if (canAim()) {
-    if (aim.charging) {
-      const proj = (aim.pressX - p.x) * aim.dirX + (aim.pressY - p.y) * aim.dirY;
-      aim.power = Math.min(1, Math.max(0, proj / PULL_RANGE));
-    }
-    sendAim(false);
-  }
-});
-
-canvas.addEventListener('pointerdown', (e) => {
+// ---------- Fluxo de sala ----------
+function createRoom() {
   ensureAudio();
-  const p = toPlay(e);
-  pointer.x = p.x;
-  pointer.y = p.y;
-  pointer.inside = true;
-  pointer.down = true;
-  try {
-    canvas.setPointerCapture(e.pointerId);
-  } catch (_) { /* ignore */ }
-  if (canAim() && !state.ballInHand) {
-    const cue = state.balls[0];
-    const dx = p.x - cue.x;
-    const dy = p.y - cue.y;
-    const d = Math.hypot(dx, dy);
-    if (d > R + 2) {
-      aim.charging = true;
-      aim.dirX = dx / d;
-      aim.dirY = dy / d;
-      aim.pressX = p.x;
-      aim.pressY = p.y;
-      aim.power = 0;
-      sendAim(true);
-    }
-  }
-  e.preventDefault();
-});
-
-canvas.addEventListener('pointerup', (e) => {
-  const p = toPlay(e);
-  pointer.x = p.x;
-  pointer.y = p.y;
-  const wasDown = pointer.down;
-  pointer.down = false;
-  const wasCharging = aim.charging;
-  aim.charging = false;
-  if (!wasDown || !gameStarted || state.over) return;
-
-  if (state.ballInHand && myTurn()) {
-    if (validCuePosition(state.balls, p.x, p.y)) {
-      const cue = state.balls[0];
-      cue.pocketed = false;
-      cue.x = p.x; cue.y = p.y;
-      cue.vx = 0; cue.vy = 0;
-      state.ballInHand = false;
-      ghostCue = null;
-      broadcast({ t: 'pf', x: p.x, y: p.y });
-      updateHud();
-    }
-    return;
-  }
-
-  if (wasCharging && canAim()) {
-    if (aim.power >= 0.02) {
-      shoot(aim.dirX, aim.dirY, aim.power);
-      broadcast({ t: 'a', off: true });
-      updateHud();
-    } else {
-      sendAim(true); // puxada cancelada: volta à mira de hover
-    }
-  }
-});
-
-canvas.addEventListener('pointercancel', () => {
-  pointer.down = false;
-  aim.charging = false;
-});
-
-canvas.addEventListener('pointerleave', () => {
-  pointer.inside = false;
-  if (!aim.charging && net && net.connected && canAim()) broadcast({ t: 'a', off: true });
-});
-
-// ---------- Desenho ----------
-function roundRect(x, y, w, h, r) {
-  ctx.beginPath();
-  ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r);
-  ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r);
-  ctx.arcTo(x, y, x + w, y, r);
-  ctx.closePath();
-}
-
-const FELT_PAD = 14;
-
-function drawCushions() {
-  // trapézios com pontas cortadas junto às caçapas (casa com a física dos queixos)
-  ctx.fillStyle = '#0a5d40';
-  const trap = (ax, ay, bx, by, cx, cy, dx, dy) => {
-    ctx.beginPath();
-    ctx.moveTo(ax, ay);
-    ctx.lineTo(bx, by);
-    ctx.lineTo(cx, cy);
-    ctx.lineTo(dx, dy);
-    ctx.closePath();
-    ctx.fill();
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-  };
-  for (const [a, b] of TOP_SEGS) {
-    trap(a - 9, -FELT_PAD, b + 9, -FELT_PAD, b - 3, 0, a + 3, 0);
-    trap(a - 9, H + FELT_PAD, b + 9, H + FELT_PAD, b - 3, H, a + 3, H);
-  }
-  for (const [a, b] of LEFT_SEGS) {
-    trap(-FELT_PAD, a - 9, -FELT_PAD, b + 9, 0, b - 3, 0, a + 3);
-    trap(W + FELT_PAD, a - 9, W + FELT_PAD, b + 9, W, b - 3, W, a + 3);
-  }
-}
-
-function drawTable() {
-  // moldura de madeira com verniz
-  const wood = ctx.createLinearGradient(0, 0, 0, TH);
-  wood.addColorStop(0, '#8a5a2b');
-  wood.addColorStop(0.5, '#6d4322');
-  wood.addColorStop(1, '#54311a');
-  ctx.fillStyle = wood;
-  roundRect(0, 0, TW, TH, 22);
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(255,235,200,0.18)';
-  ctx.lineWidth = 2;
-  roundRect(1.5, 1.5, TW - 3, TH - 3, 21);
-  ctx.stroke();
-
-  // filete dourado
-  ctx.strokeStyle = 'rgba(230,195,120,0.35)';
-  ctx.lineWidth = 1.5;
-  roundRect(RAIL - FELT_PAD - 5, RAIL - FELT_PAD - 5, W + (FELT_PAD + 5) * 2, H + (FELT_PAD + 5) * 2, 14);
-  ctx.stroke();
-
-  // feltro
-  ctx.fillStyle = '#0c6b4a';
-  roundRect(RAIL - FELT_PAD, RAIL - FELT_PAD, W + FELT_PAD * 2, H + FELT_PAD * 2, 10);
-  ctx.fill();
-
-  ctx.save();
-  ctx.translate(RAIL, RAIL);
-  drawCushions();
-
-  // linha da cabeceira + ponto do triângulo
-  ctx.strokeStyle = 'rgba(255,255,255,0.13)';
-  ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(W * 0.25, 6);
-  ctx.lineTo(W * 0.25, H - 6);
-  ctx.stroke();
-  ctx.fillStyle = 'rgba(255,255,255,0.17)';
-  ctx.beginPath();
-  ctx.arc(W * 0.72, H / 2, 3, 0, Math.PI * 2);
-  ctx.fill();
-  ctx.restore();
-
-  // vinheta do feltro
-  const felt = ctx.createRadialGradient(
-    RAIL + W / 2, RAIL + H / 2, 80,
-    RAIL + W / 2, RAIL + H / 2, W * 0.64
-  );
-  felt.addColorStop(0, 'rgba(255,255,255,0.05)');
-  felt.addColorStop(1, 'rgba(0,0,0,0.22)');
-  ctx.fillStyle = felt;
-  roundRect(RAIL - FELT_PAD, RAIL - FELT_PAD, W + FELT_PAD * 2, H + FELT_PAD * 2, 10);
-  ctx.fill();
-
-  // losangos de madrepérola nos trilhos
-  ctx.fillStyle = 'rgba(240,225,195,0.55)';
-  const diamond = (x, y) => {
-    ctx.save();
-    ctx.translate(x, y);
-    ctx.rotate(Math.PI / 4);
-    ctx.fillRect(-2.4, -2.4, 4.8, 4.8);
-    ctx.restore();
-  };
-  for (let i = 1; i < 8; i++) {
-    if (i === 4) continue;
-    const x = RAIL + (W * i) / 8;
-    diamond(x, RAIL / 2 - 5);
-    diamond(x, TH - RAIL / 2 + 5);
-  }
-  for (let i = 1; i < 4; i++) {
-    const y = RAIL + (H * i) / 4;
-    diamond(RAIL / 2 - 5, y);
-    diamond(TW - RAIL / 2 + 5, y);
-  }
-
-  // caçapas com anel de couro
-  for (const p of POCKETS) {
-    const px = RAIL + p.x;
-    const py = RAIL + p.y;
-    const vis = p.r - 3;
-    ctx.beginPath();
-    ctx.arc(px, py, vis + 3, 0, Math.PI * 2);
-    ctx.strokeStyle = '#2e1c10';
-    ctx.lineWidth = 6;
-    ctx.stroke();
-    const hole = ctx.createRadialGradient(px, py, 2, px, py, vis);
-    hole.addColorStop(0, '#000');
-    hole.addColorStop(0.75, '#07090c');
-    hole.addColorStop(1, '#12181e');
-    ctx.beginPath();
-    ctx.arc(px, py, vis, 0, Math.PI * 2);
-    ctx.fillStyle = hole;
-    ctx.fill();
-  }
-}
-
-function drawBall(x, y, id, alpha = 1, scale = 1) {
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  ctx.translate(RAIL + x, RAIL + y);
-  ctx.scale(scale, scale);
-
-  ctx.beginPath();
-  ctx.ellipse(1.5, 2.8, R * 0.95, R * 0.8, 0, 0, Math.PI * 2);
-  ctx.fillStyle = 'rgba(0,0,0,0.25)';
-  ctx.fill();
-
-  const base = id === 0 ? '#f2eee0' : id <= 8 ? ballColor(id) : '#f2eee0';
-  const body = ctx.createRadialGradient(-R * 0.4, -R * 0.45, R * 0.15, 0, 0, R * 1.08);
-  body.addColorStop(0, shade(base, 0.55));
-  body.addColorStop(0.5, base);
-  body.addColorStop(1, shade(base, -0.45));
-  ctx.beginPath();
-  ctx.arc(0, 0, R, 0, Math.PI * 2);
-  ctx.fillStyle = body;
-  ctx.fill();
-
-  if (id > 8) {
-    ctx.save();
-    ctx.beginPath();
-    ctx.arc(0, 0, R, 0, Math.PI * 2);
-    ctx.clip();
-    const c = ballColor(id);
-    const band = ctx.createLinearGradient(0, -R * 0.5, 0, R * 0.5);
-    band.addColorStop(0, shade(c, 0.25));
-    band.addColorStop(0.5, c);
-    band.addColorStop(1, shade(c, -0.3));
-    ctx.fillStyle = band;
-    ctx.fillRect(-R, -R * 0.5, R * 2, R);
-    ctx.restore();
-  }
-
-  if (id !== 0) {
-    ctx.beginPath();
-    ctx.arc(0, 0, R * 0.5, 0, Math.PI * 2);
-    ctx.fillStyle = '#f4f1e8';
-    ctx.fill();
-    ctx.fillStyle = '#20242c';
-    ctx.font = `bold ${id > 9 ? 7 : 8}px system-ui, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText(String(id), 0, 0.5);
-  }
-
-  const shine = ctx.createRadialGradient(-R * 0.38, -R * 0.5, 0.5, -R * 0.38, -R * 0.5, R * 0.9);
-  shine.addColorStop(0, 'rgba(255,255,255,0.7)');
-  shine.addColorStop(0.3, 'rgba(255,255,255,0.1)');
-  shine.addColorStop(1, 'rgba(255,255,255,0)');
-  ctx.beginPath();
-  ctx.arc(0, 0, R, 0, Math.PI * 2);
-  ctx.fillStyle = shine;
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawCueStick(cue, dirX, dirY, power, charging, alpha) {
-  const pull = charging ? 14 + power * 70 : 12;
-  const tipD = R + pull;
-  const buttD = tipD + 245;
-  const tx = cue.x - dirX * tipD;
-  const ty = cue.y - dirY * tipD;
-  const bx = cue.x - dirX * buttD;
-  const by = cue.y - dirY * buttD;
-  ctx.save();
-  ctx.translate(RAIL, RAIL);
-  ctx.globalAlpha = alpha;
-  const grad = ctx.createLinearGradient(tx, ty, bx, by);
-  grad.addColorStop(0, '#e9dfc6');
-  grad.addColorStop(0.06, '#d9b47c');
-  grad.addColorStop(0.6, '#a76b34');
-  grad.addColorStop(1, '#53341c');
-  ctx.strokeStyle = grad;
-  ctx.lineWidth = 5;
-  ctx.lineCap = 'round';
-  ctx.beginPath();
-  ctx.moveTo(tx, ty);
-  ctx.lineTo(bx, by);
-  ctx.stroke();
-  // ponteira azul (giz)
-  ctx.beginPath();
-  ctx.arc(tx, ty, 2.7, 0, Math.PI * 2);
-  ctx.fillStyle = '#5b8fc7';
-  ctx.fill();
-  ctx.restore();
-}
-
-function drawAim(dirX, dirY, power, charging, dim) {
-  const cue = state.balls[0];
-  if (cue.pocketed) return;
-  const pred = predictShot(state.balls, cue, dirX, dirY);
-  const alpha = dim ? 0.45 : 1;
-
-  drawCueStick(cue, dirX, dirY, power, charging, alpha * 0.95);
-
-  if (!pred) return;
-  ctx.save();
-  ctx.translate(RAIL, RAIL);
-  ctx.globalAlpha = alpha;
-
-  ctx.setLineDash([7, 7]);
-  ctx.strokeStyle = 'rgba(255,255,255,0.75)';
-  ctx.lineWidth = 1.6;
-  ctx.beginPath();
-  ctx.moveTo(cue.x + dirX * (R + 2), cue.y + dirY * (R + 2));
-  ctx.lineTo(pred.x, pred.y);
-  ctx.stroke();
-  ctx.setLineDash([]);
-
-  // bola fantasma no ponto de contato
-  ctx.beginPath();
-  ctx.arc(pred.x, pred.y, R, 0, Math.PI * 2);
-  ctx.strokeStyle = 'rgba(255,255,255,0.8)';
-  ctx.lineWidth = 1.4;
-  ctx.stroke();
-
-  // direção prevista da bola alvo
-  if (pred.ballId != null) {
-    const target = state.balls[pred.ballId];
-    ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(target.x, target.y);
-    ctx.lineTo(target.x + pred.tx * 44, target.y + pred.ty * 44);
-    ctx.stroke();
-  }
-  ctx.restore();
-
-  if (charging) drawPowerBar(power, alpha);
-}
-
-function drawPowerBar(power, alpha) {
-  const bw = 190;
-  const bh = 10;
-  const bx = RAIL + W / 2 - bw / 2;
-  const by = TH - RAIL / 2 - bh / 2 + 8;
-  ctx.save();
-  ctx.globalAlpha = alpha;
-  roundRect(bx, by, bw, bh, 5);
-  ctx.fillStyle = 'rgba(0,0,0,0.45)';
-  ctx.fill();
-  if (power > 0.01) {
-    const grad = ctx.createLinearGradient(bx, 0, bx + bw, 0);
-    grad.addColorStop(0, '#37b96c');
-    grad.addColorStop(0.55, '#e3c53a');
-    grad.addColorStop(1, '#d8342c');
-    roundRect(bx + 1.5, by + 1.5, (bw - 3) * power, bh - 3, 3.5);
-    ctx.fillStyle = grad;
-    ctx.fill();
-  }
-  ctx.strokeStyle = 'rgba(255,255,255,0.4)';
-  ctx.lineWidth = 1;
-  roundRect(bx, by, bw, bh, 5);
-  ctx.stroke();
-  ctx.restore();
-}
-
-function render() {
-  const now = performance.now();
-  ctx.clearRect(0, 0, TW, TH);
-  drawTable();
-
-  const animating = shooting || remoteShooting;
-  if (canAim() && (pointer.inside || aim.charging)) {
-    if (aim.charging) {
-      drawAim(aim.dirX, aim.dirY, aim.power, true, false);
-    } else {
-      const cue = state.balls[0];
-      const dx = pointer.x - cue.x;
-      const dy = pointer.y - cue.y;
-      const d = Math.hypot(dx, dy);
-      if (d > 4) drawAim(dx / d, dy / d, 0, false, false);
-    }
-  } else if (remoteAim && !myTurn() && !animating && !state.ballInHand && !state.over) {
-    drawAim(remoteAim.dx, remoteAim.dy, remoteAim.pow, remoteAim.ch, true);
-  }
-
-  // bolas afundando nas caçapas
-  for (const [id, s] of sinkAnims) {
-    const t = (now - s.t0) / 380;
-    if (t >= 1) {
-      sinkAnims.delete(id);
-      continue;
-    }
-    const ease = t * t * (3 - 2 * t);
-    const x = s.x0 + (s.px - s.x0) * ease;
-    const y = s.y0 + (s.py - s.y0) * ease;
-    drawBall(x, y, id, 1 - ease * 0.9, 1 - ease * 0.65);
-  }
-
-  for (const b of state.balls) {
-    if (b.pocketed || b.id === 0) continue;
-    drawBall(b.x, b.y, b.id);
-  }
-  const cue = state.balls[0];
-  if (!cue.pocketed && !state.ballInHand) drawBall(cue.x, cue.y, 0);
-
-  if (state.ballInHand && ghostCue) {
-    ctx.save();
-    if (!ghostCue.remote && !ghostCue.valid) ctx.filter = 'grayscale(1) brightness(1.2)';
-    drawBall(ghostCue.x, ghostCue.y, 0, 0.55);
-    ctx.restore();
-  } else if (state.ballInHand && !cue.pocketed) {
-    drawBall(cue.x, cue.y, 0, 0.55);
-  }
-}
-
-// ---------- Loop principal ----------
-let last = performance.now();
-let acc = 0;
-const STEP_DT = 1 / 240;
-
-function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000);
-  last = now;
-  if (shooting) {
-    acc += dt;
-    let n = 0;
-    while (acc >= STEP_DT && n < 60) {
-      step(state.balls, STEP_DT, ev);
-      acc -= STEP_DT;
-      n++;
-    }
-    drainShotEvents();
-    sendFrame(false);
-    if (allStopped(state.balls)) finishShot();
-  } else {
-    acc = 0;
-  }
-  render();
-  requestAnimationFrame(loop);
-}
-
-// ---------- Ações do menu ----------
-$('btn-local').addEventListener('click', () => {
-  ensureAudio();
-  mode = 'local';
-  const n = myName();
-  names = [n === 'Jogador' ? 'Jogador 1' : n, 'Jogador 2'];
-  state = makeInitialState(0, names);
-  startGame();
-});
-
-$('btn-create').addEventListener('click', () => {
-  ensureAudio();
+  if (net) net.close();
   mode = 'host';
   mySeat = 0;
   names = [myName(), 'Jogador 2'];
   roomCode = makeRoomCode();
-  els.waitCode.textContent = roomCode;
-  showPanel('wait');
+  inRoom = true;
+  phase = 'lobby';
+  board = [];
   net = makeNet();
   net.host(roomCode);
-});
+  enterRoomUi();
+  showLobby();
+  announceRoom();
+}
 
-$('btn-join').addEventListener('click', () => {
+function joinRoom(code) {
   ensureAudio();
-  const code = els.code.value.trim().toUpperCase();
+  code = (typeof code === 'string' ? code : els.code.value).trim().toUpperCase();
   if (code.length < 4) {
     setStatus('error', 'Digite o código da sala (5 letras/números).');
     return;
   }
+  if (net) net.close();
   mode = 'guest';
   mySeat = 1;
   names = ['Jogador 1', myName()];
   roomCode = code;
   net = makeNet();
   net.join(code);
-});
+}
 
-$('btn-copy-wait').addEventListener('click', async () => {
-  try {
-    await navigator.clipboard.writeText(inviteLink());
-    toast('Link copiado! Envie para seu amigo.');
-  } catch (_) {
-    toast('Copie o código: ' + roomCode);
+function startLocal() {
+  ensureAudio();
+  mode = 'local';
+  mySeat = 0;
+  const n = myName();
+  names = [n === 'Jogador' ? 'Jogador 1' : n, 'Jogador 2'];
+  inRoom = true;
+  phase = 'lobby';
+  board = [];
+  enterRoomUi();
+  showLobby();
+}
+
+function enterRoomUi() {
+  stopRoomsPolling();
+  if (mode !== 'local') {
+    els.roomChip.classList.remove('hidden');
+    els.roomCode.textContent = roomCode;
+  } else {
+    els.roomChip.classList.add('hidden');
   }
+  updateSpecUi();
+}
+
+function leaveRoom() {
+  if (net) {
+    net.send({ t: 'bye' });
+    net.close();
+  }
+  if (directory) directory.unannounce();
+  location.href = location.pathname;
+}
+
+// ---------- Lobby ----------
+function showLobby() {
+  phase = 'lobby';
+  destroyInst();
+  hideOverlays();
+  show('lobby');
+  renderLobby();
+  announceRoom();
+}
+
+function backToLobby() {
+  board = [];
+  showLobby();
+}
+
+function renderLobby() {
+  const canEdit = isHostLike();
+  els.lobbyCode.textContent = mode === 'local' ? 'LOCAL' : roomCode;
+  $('btn-copy-lobby').classList.toggle('hidden', mode === 'local');
+  $('lobby-public-row').classList.toggle('hidden', mode !== 'host');
+
+  const p2 = mode === 'local' || mode === 'guest' || playerConnId !== null || mode === 'spectator';
+  els.lobbyPlayers.innerHTML = `
+    <span class="pill p1">🟠 ${esc(names[0])}${mySeat === 0 && mode !== 'local' ? ' (você)' : ''}</span>
+    <span class="pill ${p2 ? 'p2' : 'empty'}">${p2 ? `🔵 ${esc(names[1])}${mySeat === 1 ? ' (você)' : ''}` : '💤 aguardando jogador…'}</span>`;
+
+  els.modeBtns[0].classList.toggle('sel', cfg.mode === 'casual');
+  els.modeBtns[1].classList.toggle('sel', cfg.mode === 'torneio');
+  els.modeBtns.forEach((b) => { b.disabled = !canEdit; });
+
+  els.gamesGrid.innerHTML = '';
+  for (const g of GAMES) {
+    const card = document.createElement('button');
+    card.className = 'game-card';
+    const selIdx = cfg.games.indexOf(g.id);
+    const blocked = mode === 'local' && !g.local;
+    if (selIdx >= 0) card.classList.add('sel');
+    if (blocked) card.classList.add('blocked');
+    card.innerHTML = `
+      <span class="g-icon">${g.icon}</span>
+      <span class="g-name">${g.name}</span>
+      <span class="g-desc">${blocked ? 'Somente online' : g.desc}</span>
+      ${cfg.mode === 'torneio' && selIdx >= 0 ? `<span class="g-order">${selIdx + 1}º</span>` : ''}`;
+    if (canEdit && !blocked) {
+      card.addEventListener('click', () => {
+        if (cfg.mode === 'casual') {
+          cfg.games = [g.id];
+        } else if (selIdx >= 0) {
+          cfg.games.splice(selIdx, 1);
+        } else {
+          cfg.games.push(g.id);
+        }
+        pushCfg();
+        renderLobby();
+      });
+    } else {
+      card.disabled = true;
+    }
+    els.gamesGrid.appendChild(card);
+  }
+
+  const need = cfg.mode === 'torneio' ? 2 : 1;
+  const okGames = cfg.mode === 'torneio' ? cfg.games.length >= need : cfg.games.length === 1;
+  const okPlayers = mode === 'local' || mode !== 'host' || playerConnId !== null;
+  els.btnStart.classList.toggle('hidden', !canEdit);
+  els.btnStart.disabled = !(okGames && okPlayers);
+  if (!canEdit) {
+    els.lobbyHint.textContent = mode === 'spectator'
+      ? '👁 Você é espectador. O anfitrião escolhe o modo e os jogos.'
+      : 'O anfitrião escolhe o modo e os jogos. Aguarde o início!';
+  } else if (!okPlayers) {
+    els.lobbyHint.textContent = 'Convide alguém: copie o link e envie. A sala também aparece na lista pública.';
+  } else if (!okGames) {
+    els.lobbyHint.textContent = cfg.mode === 'torneio'
+      ? 'Escolha 2 ou mais jogos para o torneio (a ordem dos cliques define a sequência).'
+      : 'Escolha 1 jogo para a partida casual.';
+  } else {
+    els.lobbyHint.textContent = cfg.mode === 'torneio'
+      ? `Torneio de ${cfg.games.length} partidas — cada vitória vale 1 ponto no placar.`
+      : 'Tudo pronto!';
+  }
+}
+
+function pushCfg() {
+  if (mode === 'host') {
+    broadcast({ t: 'cfg', cfg });
+    announceRoom();
+  }
+}
+
+// ---------- Partidas ----------
+function makeEnv(idx) {
+  const alive = { ok: true };
+  instAlive = alive;
+  return {
+    W: CW,
+    H: CH,
+    seat: mode === 'spectator' ? -1 : mySeat,
+    isLocal: mode === 'local',
+    isHost: isHostLike(),
+    names,
+    idx,
+    send(p) {
+      if (alive.ok && mode !== 'local' && net) broadcast({ t: 'g', p });
+    },
+    sendPrivate(p) {
+      if (alive.ok && mode === 'host' && playerConnId !== null) net.sendTo(playerConnId, { t: 'g', p });
+    },
+    setMsg(t) { if (alive.ok) els.msg.textContent = t || ''; },
+    setHint(t) { if (alive.ok) els.hint.textContent = t || ''; },
+    setSub(seat, html) { if (alive.ok && els.cards[seat]) els.cards[seat].sub.innerHTML = html || ''; },
+    setActions(list) {
+      if (!alive.ok) return;
+      els.actions.innerHTML = '';
+      els.actions.classList.toggle('hidden', !list || !list.length);
+      for (const b of list || []) {
+        const btn = document.createElement('button');
+        btn.textContent = b.label;
+        btn.disabled = !!b.disabled;
+        btn.addEventListener('click', () => { ensureAudio(); b.onClick(); });
+        els.actions.appendChild(btn);
+      }
+    },
+    finish(winner, line) {
+      if (!alive.ok || phase !== 'playing') return;
+      if (mode === 'guest') net.send({ t: 'gres', idx, winner, line });
+      else applyResult(idx, winner, line);
+    },
+    sfx,
+    playing: () => alive.ok && phase === 'playing',
+  };
+}
+
+function destroyInst() {
+  if (instAlive) instAlive.ok = false;
+  inst = null;
+  els.actions.innerHTML = '';
+  els.actions.classList.add('hidden');
+  els.msg.textContent = '';
+  els.hint.textContent = '';
+  els.cards[0].sub.innerHTML = '';
+  els.cards[1].sub.innerHTML = '';
+}
+
+function startMatch(idx, gameId, snap) {
+  const mod = gameById(gameId);
+  if (!mod) return;
+  destroyInst();
+  matchIdx = idx;
+  currentGameId = gameId;
+  phase = 'playing';
+  hideOverlays();
+  show('game');
+  $('btn-abort').classList.toggle('hidden', !isHostLike());
+  updateCards();
+  inst = mod.create(makeEnv(idx));
+  inst.start();
+  if (snap) inst.restore(snap);
+  updateTourneyLine();
+  announceRoom();
+}
+
+function hostStart() {
+  if (!isHostLike()) return;
+  board = [];
+  sendMs(0, cfg.games[0]);
+}
+
+function sendMs(idx, gameId) {
+  broadcast({ t: 'ms', idx, game: gameId });
+  startMatch(idx, gameId, null);
+}
+
+// resultado autoritativo (anfitrião/local)
+function applyResult(idx, winner, line) {
+  if (!isHostLike()) return;
+  if (phase !== 'playing' || idx !== matchIdx || board[idx]) return;
+  board[idx] = { game: currentGameId, winner, line };
+  broadcast({ t: 'gend', idx, winner, line });
+  phase = 'inter';
+  showInter();
+  announceRoom();
+}
+
+function wins() {
+  const w = [0, 0];
+  for (const r of board) {
+    if (r && r.winner !== null && r.winner !== undefined) w[r.winner]++;
+  }
+  return w;
+}
+
+function boardHtml() {
+  if (!board.length) return '';
+  const [w0, w1] = wins();
+  let rows = board.map((r, i) => {
+    if (!r) return '';
+    const g = gameById(r.game);
+    const res = r.winner === null || r.winner === undefined
+      ? '🤝 Empate'
+      : `🏅 ${esc(names[r.winner])}`;
+    return `<div class="board-row"><span>${i + 1}. ${g ? g.icon + ' ' + g.name : esc(r.game)}</span><span>${res}</span></div>`;
+  }).join('');
+  return `
+    <div class="board-score">${esc(names[0])} <b>${w0} × ${w1}</b> ${esc(names[1])}</div>
+    <div class="board-rows">${rows}</div>`;
+}
+
+function updateTourneyLine() {
+  if (cfg.mode === 'torneio') {
+    const [w0, w1] = wins();
+    els.tourney.textContent = `🏆 Torneio — partida ${matchIdx + 1}/${cfg.games.length} · ${names[0]} ${w0} × ${w1} ${names[1]}`;
+    els.tourney.classList.remove('hidden');
+  } else if (board.length > 0) {
+    const [w0, w1] = wins();
+    els.tourney.textContent = `Série: ${names[0]} ${w0} × ${w1} ${names[1]}`;
+    els.tourney.classList.remove('hidden');
+  } else {
+    els.tourney.classList.add('hidden');
+  }
+}
+
+function updateCards() {
+  for (const seat of [0, 1]) {
+    els.cards[seat].name.textContent = names[seat] + (mode !== 'local' && seat === mySeat ? ' (você)' : '');
+  }
+}
+
+// ---------- Overlays ----------
+function hideOverlays() {
+  els.inter.classList.add('hidden');
+  els.final.classList.add('hidden');
+  els.end.classList.add('hidden');
+}
+
+function showInter() {
+  const r = board[matchIdx];
+  els.interTitle.textContent = r ? r.line : 'Fim da partida';
+  els.interBoard.innerHTML = boardHtml();
+  els.interBtns.innerHTML = '';
+  updateTourneyLine();
+  if (isHostLike()) {
+    const isTourney = cfg.mode === 'torneio';
+    const played = board.filter(Boolean).length;
+    const more = isTourney && played < cfg.games.length;
+    const mk = (label, cls, fn) => {
+      const b = document.createElement('button');
+      b.textContent = label;
+      b.className = cls;
+      b.addEventListener('click', () => { ensureAudio(); fn(); });
+      els.interBtns.appendChild(b);
+    };
+    if (isTourney) {
+      if (more) mk(`Próxima partida (${gameById(cfg.games[played]).name})`, 'primary big', () => sendMs(played, cfg.games[played]));
+      else mk('Ver resultado final 🏆', 'primary big', () => { broadcast({ t: 'final' }); showFinal(); });
+    } else {
+      mk('Jogar novamente', 'primary big', () => sendMs(board.length, cfg.games[0]));
+      const gname = gameById(cfg.games[0]).name;
+      void gname;
+    }
+    mk('Voltar ao lobby', 'ghost', () => { broadcast({ t: 'lobby' }); backToLobby(); });
+  } else {
+    els.interBtns.innerHTML = '<p class="muted">Aguardando o anfitrião…</p>';
+  }
+  els.inter.classList.remove('hidden');
+  sfx('score', 0.6);
+}
+
+function showFinal() {
+  phase = 'final';
+  const [w0, w1] = wins();
+  els.finalTitle.textContent = w0 === w1
+    ? `🤝 Torneio empatado: ${w0} × ${w1}!`
+    : `🏆 ${names[w0 > w1 ? 0 : 1]} é o campeão do torneio! (${Math.max(w0, w1)} × ${Math.min(w0, w1)})`;
+  els.finalBoard.innerHTML = boardHtml();
+  els.finalBtns.innerHTML = '';
+  if (isHostLike()) {
+    const b = document.createElement('button');
+    b.textContent = 'Voltar ao lobby';
+    b.className = 'primary big';
+    b.addEventListener('click', () => { broadcast({ t: 'lobby' }); backToLobby(); });
+    els.finalBtns.appendChild(b);
+  } else {
+    els.finalBtns.innerHTML = '<p class="muted">Aguardando o anfitrião…</p>';
+  }
+  els.inter.classList.add('hidden');
+  els.final.classList.remove('hidden');
+  announceRoom();
+}
+
+function showEnd(text) {
+  els.endMsg.textContent = text;
+  els.end.classList.remove('hidden');
+  if (net) {
+    net.close();
+    net = null;
+  }
+  if (directory) directory.unannounce();
+  inRoom = false;
+}
+
+// ---------- Entrada ----------
+function toCanvas(e) {
+  const rect = canvas.getBoundingClientRect();
+  return {
+    x: ((e.clientX - rect.left) * CW) / rect.width,
+    y: ((e.clientY - rect.top) * CH) / rect.height,
+  };
+}
+
+canvas.addEventListener('pointermove', (e) => {
+  if (phase !== 'playing' || !inst) return;
+  const p = toCanvas(e);
+  inst.pointer('move', p.x, p.y, e.pointerId);
+});
+canvas.addEventListener('pointerdown', (e) => {
+  ensureAudio();
+  if (phase !== 'playing' || !inst) return;
+  try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* ignore */ }
+  const p = toCanvas(e);
+  inst.pointer('down', p.x, p.y, e.pointerId);
+  e.preventDefault();
+});
+canvas.addEventListener('pointerup', (e) => {
+  if (phase !== 'playing' || !inst) return;
+  const p = toCanvas(e);
+  inst.pointer('up', p.x, p.y, e.pointerId);
+});
+canvas.addEventListener('pointercancel', () => {
+  if (inst) inst.pointer('up', -999, -999, 0);
+});
+window.addEventListener('keydown', (e) => {
+  if (phase !== 'playing' || !inst) return;
+  if (e.target && (e.target.tagName === 'INPUT' || e.target.tagName === 'TEXTAREA')) return;
+  inst.key('down', e.key);
+  if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', ' '].includes(e.key)) e.preventDefault();
+});
+window.addEventListener('keyup', (e) => {
+  if (phase !== 'playing' || !inst) return;
+  inst.key('up', e.key);
 });
 
-$('btn-cancel-wait').addEventListener('click', () => {
-  if (net) net.close();
-  net = null;
-  mode = 'menu';
-  setStatus('', '');
-  showPanel('main');
-});
+// ---------- Loop ----------
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.04, (now - last) / 1000);
+  last = now;
+  if (inst) {
+    if (phase === 'playing') {
+      try { inst.tick(dt); } catch (err) { console.error(err); }
+    }
+    ctx.clearRect(0, 0, CW, CH);
+    try { inst.draw(ctx); } catch (err) { console.error(err); }
+  } else {
+    ctx.clearRect(0, 0, CW, CH);
+  }
+  requestAnimationFrame(loop);
+}
 
-$('btn-copy').addEventListener('click', async () => {
+// ---------- Ações ----------
+$('btn-create').addEventListener('click', createRoom);
+$('btn-join').addEventListener('click', () => joinRoom());
+$('btn-local').addEventListener('click', startLocal);
+$('btn-start').addEventListener('click', hostStart);
+$('btn-refresh-rooms').addEventListener('click', refreshRooms);
+els.roomsFilter.addEventListener('input', () => renderRooms(null));
+els.roomsKind.addEventListener('change', () => renderRooms(null));
+els.modeBtns[0].addEventListener('click', () => {
+  cfg.mode = 'casual';
+  cfg.games = cfg.games.slice(0, 1);
+  pushCfg();
+  renderLobby();
+});
+els.modeBtns[1].addEventListener('click', () => {
+  cfg.mode = 'torneio';
+  pushCfg();
+  renderLobby();
+});
+els.chkPublic.addEventListener('change', announceRoom);
+$('btn-copy-lobby').addEventListener('click', copyInvite);
+$('btn-copy').addEventListener('click', copyInvite);
+$('btn-leave').addEventListener('click', leaveRoom);
+$('btn-leave-lobby').addEventListener('click', leaveRoom);
+$('btn-abort').addEventListener('click', () => {
+  if (!isHostLike() || phase === 'lobby') return;
+  broadcast({ t: 'lobby' });
+  backToLobby();
+  toast('Partida encerrada — de volta ao lobby.');
+});
+$('btn-end-menu').addEventListener('click', () => { location.href = location.pathname; });
+
+async function copyInvite() {
   try {
     await navigator.clipboard.writeText(inviteLink());
-    toast('Link copiado!');
+    toast('Link copiado! Envie para os amigos.');
   } catch (_) {
     toast('Código da sala: ' + roomCode);
   }
-});
-
-$('btn-leave').addEventListener('click', () => {
-  if (net) {
-    net.send({ t: 'bye' });
-    net.close();
-  }
-  location.href = location.pathname;
-});
-
-els.btnRematch.addEventListener('click', () => {
-  if (mode === 'guest') {
-    net.send({ t: 'wr' });
-    els.btnRematch.disabled = true;
-    els.btnRematch.textContent = 'Aguardando o anfitrião…';
-  } else {
-    doRematch();
-  }
-});
-
-$('btn-menu').addEventListener('click', () => {
-  if (net) {
-    net.send({ t: 'bye' });
-    net.close();
-  }
-  location.href = location.pathname;
-});
+}
 
 window.addEventListener('beforeunload', () => {
   if (net) net.send({ t: 'bye' });
+  if (directory) directory.unannounce();
 });
 
 // ---------- Inicialização ----------
 function setupCanvas() {
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = TW * dpr;
-  canvas.height = TH * dpr;
+  canvas.width = CW * dpr;
+  canvas.height = CH * dpr;
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
 }
 window.addEventListener('resize', setupCanvas);
 setupCanvas();
+
+function startRoomsPolling() {
+  refreshRooms();
+  stopRoomsPolling();
+  roomsTimer = setInterval(() => {
+    if (mode === 'menu') refreshRooms();
+  }, 5000);
+}
+function stopRoomsPolling() {
+  if (roomsTimer) clearInterval(roomsTimer);
+  roomsTimer = null;
+}
 
 const params = new URLSearchParams(location.search);
 const salaParam = (params.get('sala') || '').toUpperCase();
@@ -1097,14 +859,20 @@ if (salaParam) {
   els.code.value = salaParam;
   $('btn-join').classList.add('primary');
 }
-
+show('menu');
+if (typeof Peer !== 'undefined') startRoomsPolling();
 requestAnimationFrame(loop);
 
 // gancho somente-leitura para depuração/testes automatizados
-window.__sinuca = {
-  get state() { return state; },
-  get shooting() { return shooting; },
+window.__hub = {
+  get phase() { return phase; },
   get mode() { return mode; },
+  get cfg() { return cfg; },
+  get board() { return board; },
+  get gameId() { return currentGameId; },
+  get inst() { return inst; },
+  get seat() { return mode === 'spectator' ? -1 : mySeat; },
+  get roomCode() { return roomCode; },
   get specCount() { return specCount; },
-  get aim() { return aim; },
+  get names() { return names; },
 };
