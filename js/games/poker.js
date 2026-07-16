@@ -471,12 +471,12 @@ export default {
         ctx.stroke();
         if (!v) return;
         // pote (com pilha de fichas) e mão
-        if (v.pot > 0) drawChips(ctx, env.W / 2 - 34, env.H / 2 - 66, v.pot);
+        if (v.pot > 0) drawChips(ctx, env.W / 2 - 76, env.H / 2 - 66, v.pot);
         ctx.fillStyle = 'rgba(255,255,255,0.9)';
         ctx.font = 'bold 17px system-ui';
-        ctx.textAlign = 'center';
+        ctx.textAlign = 'left';
         ctx.textBaseline = 'middle';
-        ctx.fillText(`Pote: ${v.pot}`, env.W / 2 + 34, env.H / 2 - 70);
+        ctx.fillText(`Pote: ${v.pot}`, env.W / 2 + 16, env.H / 2 - 70);
         ctx.fillStyle = 'rgba(255,255,255,0.45)';
         ctx.font = '13px system-ui';
         ctx.fillText(`Mão ${v.hand}/${MAX_HANDS} · blinds ${SB}/${BB}`, env.W / 2, 80);
