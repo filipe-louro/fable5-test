@@ -13,7 +13,7 @@ sem backend e sem chave de API — 100% estático, pronto para a Vercel.
 | ⚽ Futebol de Botão | Física por turnos | Arremesse os 5 jogadores-círculo; primeiro a 3 gols |
 | 🏓 Ping Pong | Tempo real | Primeiro a 7 pontos |
 | 🏒 Air Hockey | Tempo real | Primeiro a 5 gols |
-| 🎳 Boliche | Física por turnos | 5 frames, strike/spare valem bônus |
+| 🎳 Boliche | Física por turnos, **pista 3D (WebGL)** | 5 frames, strike/spare valem bônus |
 | ⛳ Mini-Golf | Física por turnos | 3 buracos, menos tacadas |
 | 🪩 Pinball | Física em turnos | 2 bolas cada, maior pontuação |
 | 🃏 Poker Hold'em | Cartas (só online) | Heads-up, zere as fichas do rival |
@@ -61,6 +61,13 @@ sem backend e sem chave de API — 100% estático, pronto para a Vercel.
 | `js/engine.js` | Física de círculos, mira "pressione e puxe", sons, utilitários |
 | `js/physics.js` / `js/rules.js` | Física e regras específicas da sinuca |
 | `js/games/*.js` | Um módulo por jogo, com interface comum |
+| `js/vendor/three.module.js` | Three.js (MIT) vendorizado — renderização 3D do boliche |
+
+O boliche renderiza em **3D real** (Three.js/WebGL): câmera atrás da bola,
+pinos modelados, sombras e câmera que acompanha o arremesso. A simulação
+física e o protocolo multiplayer são os mesmos da versão 2D — o 3D é só o
+renderizador, então convidado e espectadores assistem em 3D também. Sem
+WebGL disponível, o jogo cai automaticamente para a visão 2D de cima.
 
 ### Interface de um jogo
 

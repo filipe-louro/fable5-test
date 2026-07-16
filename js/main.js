@@ -561,6 +561,9 @@ function makeEnv(idx) {
 
 function destroyInst() {
   if (instAlive) instAlive.ok = false;
+  if (inst && typeof inst.destroy === 'function') {
+    try { inst.destroy(); } catch (err) { console.error(err); }
+  }
   inst = null;
   els.actions.innerHTML = '';
   els.actions.classList.add('hidden');
