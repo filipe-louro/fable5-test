@@ -59,12 +59,13 @@ export default {
     let drag = null; // {sy, lastX}
     let aim3d = { angle: 0, power: 0 };
     let lastDraw = 0;
-    const tableEl = document.getElementById('table');
+    const tableEl = typeof document !== 'undefined' ? document.getElementById('table') : null;
     const zOf = (y2) => -(y2 - CY);
 
     function course() { return courses[st.hole]; }
 
     async function init3d() {
+      if (typeof window === 'undefined' || typeof document === 'undefined') return;
       let mod;
       try {
         mod = await import('../vendor/three.module.js');
@@ -79,8 +80,9 @@ export default {
         renderer.shadowMap.enabled = true;
         renderer.shadowMap.type = mod.PCFSoftShadowMap;
         renderer.domElement.className = 'gl-layer';
-        document.getElementById('table-wrap').insertBefore(renderer.domElement, tableEl);
-        tableEl.style.background = 'transparent';
+        const wrap = document.getElementById('table-wrap');
+        if (wrap && tableEl) wrap.insertBefore(renderer.domElement, tableEl);
+        if (tableEl) tableEl.style.background = 'transparent';
         T3 = mod;
         gl = buildScene(mod, renderer);
         buildHole(st.hole);
@@ -88,7 +90,7 @@ export default {
         console.error('WebGL indisponível, usando visão 2D', err);
         T3 = null;
         gl = null;
-        tableEl.style.background = '';
+        if (tableEl) tableEl.style.background = '';
       }
       setUi();
     }
@@ -355,7 +357,7 @@ export default {
           ? (T3
             ? 'Arraste para os lados para girar a mira e para baixo para dar força; solte para tacar.'
             : 'Pressione e puxe para trás para dar a tacada. Chegue devagar no buraco!')
-          : env.seat === -1 ? '👁 Assistindo' : `Aguardando ${env.names[st.turn]}…`);
+          : env.seat === -1 ? 'Modo Espectador' : `Aguardando ${env.names[st.turn]}…`);
       }
     }
 
@@ -506,7 +508,7 @@ export default {
           } catch (_) { /* ignore */ }
           gl = null;
         }
-        tableEl.style.background = '';
+        if (tableEl) tableEl.style.background = '';
       },
       snapshot() { return serialize(); },
       restore(s) { applyFull(s); },

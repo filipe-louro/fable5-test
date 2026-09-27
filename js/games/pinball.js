@@ -67,7 +67,7 @@ export default {
     function setUi() {
       for (const s of [0, 1]) {
         const ms = st.m[s];
-        env.setSub(s, `<b class="big-score">${ms.score}</b> pts · ${ms.ballsUsed}/${BALLS_EACH} bolas${ms.phase === 'done' ? ' ✔' : ''}`);
+        env.setSub(s, `<b class="big-score">${ms.score}</b> pts · ${ms.ballsUsed}/${BALLS_EACH} bolas${ms.phase === 'done' ? ' · Finalizado' : ''}`);
       }
       if (!st.over) {
         if (env.isLocal) {
@@ -76,7 +76,7 @@ export default {
         } else {
           env.setMsg(`Corrida de pontos — ${BALLS_EACH} bolas para cada um!`);
           env.setHint(env.seat === -1
-            ? '👁 Assistindo às duas máquinas'
+            ? 'Modo Espectador · Acompanhando ambas as máquinas'
             : st.m[env.seat].phase === 'done'
               ? 'Você terminou! Aguardando o adversário…'
               : 'Sua máquina: flippers com ◄ ► (ou A/L) ou toque nas metades.');
@@ -445,7 +445,7 @@ export default {
       if (ms.phase === 'done') {
         ctx.fillStyle = 'rgba(255,255,255,0.55)';
         ctx.font = 'bold 22px system-ui';
-        ctx.fillText('FIM ✔', cx, 300);
+        ctx.fillText('FINALIZADO', cx, 300);
       }
     }
 
@@ -489,7 +489,8 @@ export default {
       pointer(type, x) {
         const m = myFlippers();
         if (m == null || m < 0 || !st || st.over || st.m[m].phase !== 'play') return;
-        if (type === 'down') setFlip(m, x < env.W / 2 ? 0 : 1, true);
+        const midX = OX[m] + MW / 2;
+        if (type === 'down') setFlip(m, x < midX ? 0 : 1, true);
         else if (type === 'up') { setFlip(m, 0, false); setFlip(m, 1, false); }
       },
       key(type, k) {

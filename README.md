@@ -10,15 +10,15 @@ sem backend e sem chave de API — 100% estático, pronto para a Vercel.
 | Jogo | Estilo | Como vence |
 | --- | --- | --- |
 | 🎱 Sinuca | Física por turnos | Bola 8 (regras completas: grupos, faltas, bola na mão) |
-| ⚽ Futebol de Botão | Física por turnos | Arremesse os 5 jogadores-círculo; primeiro a 3 gols |
-| 🏓 Ping Pong | Tempo real | Primeiro a 7 pontos |
+| 🐍 Cobrinha .IO | Tempo real (.io) | Colete orbes, use turbo e corte o rival; primeiro a 3 rounds |
+| ⚡ Laser Tanks | Ação / Duelo em tempo real | Ricochetes laser e destruição em 2 hits; primeiro a 3 rounds |
 | 🏒 Air Hockey | Tempo real | Primeiro a 5 gols |
-| 🎳 Boliche | Física por turnos, **pista 3D (WebGL)** | 5 frames, strike/spare valem bônus |
+| 🏓 Ping Pong | Tempo real | Primeiro a 7 pontos |
+| ⚽ Futebol de Botão | Física por turnos | Arremesse os 5 jogadores-círculo; primeiro a 3 gols |
+| 🎳 Boliche | Física por turnos, **pista 3D (WebGL)** | 10 frames oficiais, strike/spare com bônus real |
 | ⛳ Mini-Golf | Física por turnos, **3D (WebGL)** | 3 buracos, menos tacadas |
 | 🪩 Pinball | **2 máquinas, corrida simultânea online** | 2 bolas cada, maior pontuação |
 | 🃏 Poker Hold'em | Cartas (só online) | Heads-up, zere as fichas do rival |
-| ⚫ Damas | Tabuleiro | Capture tudo ou trave o rival |
-| ❌ Jogo da Velha | Tabuleiro | Três em linha |
 
 ## Como funciona
 

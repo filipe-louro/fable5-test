@@ -404,6 +404,24 @@ export class Fx {
     this.items.push({ kind: 'b', str, color, t: 0, life: 1.5 });
   }
 
+  confetti(x, y, n = 36) {
+    const colors = ['#00f0ff', '#ff007f', '#ffd54d', '#22c55e', '#a855f7', '#ff5533', '#ffffff'];
+    for (let i = 0; i < n; i++) {
+      const a = Math.random() * Math.PI * 2;
+      const s = 140 + Math.random() * 320;
+      this.items.push({
+        kind: 'c', x, y,
+        vx: Math.cos(a) * s,
+        vy: Math.sin(a) * s - 160,
+        color: colors[Math.floor(Math.random() * colors.length)],
+        t: 0, life: 0.9 + Math.random() * 0.7,
+        size: 5 + Math.random() * 4,
+        rot: Math.random() * Math.PI * 2,
+        rotSpeed: (Math.random() - 0.5) * 14,
+      });
+    }
+  }
+
   tick(dt) {
     for (const f of this.items) {
       f.t += dt;
@@ -411,6 +429,11 @@ export class Fx {
         f.vy += 700 * dt;
         f.x += f.vx * dt;
         f.y += f.vy * dt;
+      } else if (f.kind === 'c') {
+        f.vy += 480 * dt;
+        f.x += f.vx * dt;
+        f.y += f.vy * dt;
+        f.rot += f.rotSpeed * dt;
       }
     }
     this.items = this.items.filter((f) => f.t < f.life);
@@ -438,6 +461,12 @@ export class Fx {
         ctx.globalAlpha = 1 - k;
         ctx.fillStyle = f.color;
         ctx.fillRect(f.x - f.size / 2, f.y - f.size / 2, f.size, f.size);
+      } else if (f.kind === 'c') {
+        ctx.globalAlpha = 1 - k;
+        ctx.fillStyle = f.color;
+        ctx.translate(f.x, f.y);
+        ctx.rotate(f.rot);
+        ctx.fillRect(-f.size / 2, -f.size / 4, f.size, f.size * 0.55);
       } else if (f.kind === 'b') {
         const pop = Math.min(1, f.t / 0.18);
         ctx.globalAlpha = Math.min(1, (f.life - f.t) / 0.4);
@@ -459,34 +488,116 @@ export class Fx {
 
 // ---------- Áudio ----------
 let audioCtx = null;
+let masterGain = null;
+let compressor = null;
+let muted = typeof localStorage !== 'undefined' ? localStorage.getItem('hub_audio_muted') === 'true' : false;
+
 export function ensureAudio() {
+  if (typeof window === 'undefined') return;
   if (!audioCtx) {
     const AC = window.AudioContext || window.webkitAudioContext;
-    if (AC) audioCtx = new AC();
+    if (AC) {
+      audioCtx = new AC();
+      compressor = audioCtx.createDynamicsCompressor();
+      compressor.threshold.setValueAtTime(-12, audioCtx.currentTime);
+      compressor.knee.setValueAtTime(30, audioCtx.currentTime);
+      compressor.ratio.setValueAtTime(8, audioCtx.currentTime);
+      compressor.attack.setValueAtTime(0.003, audioCtx.currentTime);
+      compressor.release.setValueAtTime(0.15, audioCtx.currentTime);
+
+      masterGain = audioCtx.createGain();
+      masterGain.gain.setValueAtTime(muted ? 0 : 0.85, audioCtx.currentTime);
+      masterGain.connect(compressor);
+      compressor.connect(audioCtx.destination);
+    }
   }
   if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
 }
 
+export function isAudioMuted() {
+  return muted;
+}
+
+export function toggleAudioMute() {
+  muted = !muted;
+  if (typeof localStorage !== 'undefined') {
+    try { localStorage.setItem('hub_audio_muted', String(muted)); } catch (_) {}
+  }
+  if (masterGain && audioCtx) {
+    masterGain.gain.setValueAtTime(muted ? 0 : 0.85, audioCtx.currentTime);
+  }
+  return muted;
+}
+
 export function sfx(kind, vol = 1) {
-  if (!audioCtx || audioCtx.state !== 'running') return;
+  if (!audioCtx || audioCtx.state === 'closed' || muted) return;
+  if (audioCtx.state === 'suspended') {
+    try { audioCtx.resume(); } catch (_) {}
+  }
   const t = audioCtx.currentTime;
+
+  // Rota de áudio via masterGain -> compressor -> destination
   const g = audioCtx.createGain();
-  g.connect(audioCtx.destination);
-  const o = audioCtx.createOscillator();
-  o.connect(g);
-  if (kind === 'click') {
-    o.type = 'triangle';
-    o.frequency.value = 700 + Math.random() * 350;
-    g.gain.setValueAtTime(0.22 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.06);
-    o.start(t); o.stop(t + 0.07);
-  } else if (kind === 'cushion') {
+  g.connect(masterGain);
+
+  if (kind === 'hover') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
     o.type = 'sine';
-    o.frequency.value = 150;
+    o.frequency.value = 1100;
+    g.gain.setValueAtTime(0.04 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.0001, t + 0.02);
+    o.start(t); o.stop(t + 0.025);
+  } else if (kind === 'select') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(520, t);
+    o.frequency.exponentialRampToValueAtTime(880, t + 0.06);
+    g.gain.setValueAtTime(0.18 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    o.start(t); o.stop(t + 0.08);
+  } else if (kind === 'reaction') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'sine';
+    o.frequency.setValueAtTime(420, t);
+    o.frequency.exponentialRampToValueAtTime(1100, t + 0.08);
+    g.gain.setValueAtTime(0.25 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.1);
+    o.start(t); o.stop(t + 0.11);
+  } else if (kind === 'ready') {
+    [587.33, 880.00].forEach((freq, idx) => {
+      const o = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      const st = t + idx * 0.08;
+      og.gain.setValueAtTime(0.16 * vol, st);
+      og.gain.exponentialRampToValueAtTime(0.001, st + 0.18);
+      o.connect(og);
+      og.connect(masterGain);
+      o.start(st); o.stop(st + 0.19);
+    });
+  } else if (kind === 'click') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'triangle';
+    o.frequency.value = 650 + Math.random() * 250;
+    g.gain.setValueAtTime(0.24 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    o.start(t); o.stop(t + 0.06);
+  } else if (kind === 'cushion') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'sine';
+    o.frequency.value = 140;
     g.gain.setValueAtTime(0.18 * vol, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
     o.start(t); o.stop(t + 0.1);
   } else if (kind === 'pocket') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
     o.type = 'sine';
     o.frequency.setValueAtTime(430, t);
     o.frequency.exponentialRampToValueAtTime(85, t + 0.16);
@@ -494,19 +605,200 @@ export function sfx(kind, vol = 1) {
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.18);
     o.start(t); o.stop(t + 0.2);
   } else if (kind === 'score') {
-    o.type = 'triangle';
-    o.frequency.setValueAtTime(520, t);
-    o.frequency.setValueAtTime(660, t + 0.09);
-    o.frequency.setValueAtTime(880, t + 0.18);
-    g.gain.setValueAtTime(0.22 * vol, t);
-    g.gain.exponentialRampToValueAtTime(0.001, t + 0.35);
-    o.start(t); o.stop(t + 0.36);
+    const notes = [523.25, 659.25, 783.99, 1046.50]; // Dó maior brilhante
+    notes.forEach((freq, idx) => {
+      const o = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = freq;
+      const st = t + idx * 0.07;
+      og.gain.setValueAtTime(0.18 * vol, st);
+      og.gain.exponentialRampToValueAtTime(0.001, st + 0.22);
+      o.connect(og);
+      og.connect(masterGain);
+      o.start(st); o.stop(st + 0.23);
+    });
   } else if (kind === 'bumper') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
     o.type = 'square';
-    o.frequency.value = 300 + Math.random() * 200;
+    o.frequency.value = 280 + Math.random() * 200;
     g.gain.setValueAtTime(0.12 * vol, t);
     g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
     o.start(t); o.stop(t + 0.09);
+  } else if (kind === 'laser') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'sawtooth';
+    o.frequency.setValueAtTime(950, t);
+    o.frequency.exponentialRampToValueAtTime(140, t + 0.08);
+    g.gain.setValueAtTime(0.24 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.09);
+    o.start(t); o.stop(t + 0.1);
+  } else if (kind === 'explosion') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(160, t);
+    o.frequency.exponentialRampToValueAtTime(30, t + 0.35);
+    g.gain.setValueAtTime(0.4 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+    o.start(t); o.stop(t + 0.42);
+
+    const pop = audioCtx.createOscillator();
+    const popG = audioCtx.createGain();
+    pop.type = 'square';
+    pop.frequency.setValueAtTime(90, t);
+    pop.frequency.exponentialRampToValueAtTime(20, t + 0.12);
+    popG.gain.setValueAtTime(0.22 * vol, t);
+    popG.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+    pop.connect(popG);
+    popG.connect(masterGain);
+    pop.start(t); pop.stop(t + 0.15);
+  } else if (kind === 'pickup') {
+    [784, 1175].forEach((freq, idx) => {
+      const o = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      o.type = 'sine';
+      o.frequency.value = freq;
+      const st = t + idx * 0.04;
+      og.gain.setValueAtTime(0.18 * vol, st);
+      og.gain.exponentialRampToValueAtTime(0.001, st + 0.1);
+      o.connect(og);
+      og.connect(masterGain);
+      o.start(st); o.stop(st + 0.11);
+    });
+  } else if (kind === 'boost') {
+    const o = audioCtx.createOscillator();
+    o.connect(g);
+    o.type = 'sine';
+    o.frequency.setValueAtTime(260, t);
+    o.frequency.exponentialRampToValueAtTime(540, t + 0.07);
+    g.gain.setValueAtTime(0.12 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.08);
+    o.start(t); o.stop(t + 0.09);
+  } else if (kind === 'whistle' || kind === 'foul') {
+    // Apito esportivo realista: dois tons dissonantes próximos com LFO vibrato
+    const isDouble = kind === 'foul';
+    const bursts = isDouble ? [0, 0.14] : [0];
+    bursts.forEach((offset) => {
+      const st = t + offset;
+      const dur = isDouble ? 0.11 : 0.26;
+      [2750, 3080].forEach((freq) => {
+        const o = audioCtx.createOscillator();
+        const og = audioCtx.createGain();
+        o.type = 'sine';
+        o.frequency.setValueAtTime(freq, st);
+
+        // LFO vibrato para o trinado de esfera do apito
+        const lfo = audioCtx.createOscillator();
+        const lfoGain = audioCtx.createGain();
+        lfo.frequency.value = 28;
+        lfoGain.gain.value = 90;
+        lfo.connect(o.frequency);
+
+        og.gain.setValueAtTime(0.001, st);
+        og.gain.linearRampToValueAtTime(0.16 * vol, st + 0.02);
+        og.gain.exponentialRampToValueAtTime(0.001, st + dur);
+
+        o.connect(og);
+        og.connect(masterGain);
+        lfo.start(st); lfo.stop(st + dur);
+        o.start(st); o.stop(st + dur);
+      });
+    });
+  } else if (kind === 'tt_paddle') {
+    // Ping pong: batida oca de raquete emborrachada
+    const o = audioCtx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(490, t);
+    o.frequency.exponentialRampToValueAtTime(210, t + 0.045);
+    g.gain.setValueAtTime(0.3 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.05);
+    o.connect(g);
+    o.start(t); o.stop(t + 0.055);
+  } else if (kind === 'tt_table') {
+    // Ping pong: batida oca no tampo de madeira da mesa
+    const o = audioCtx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(360, t);
+    o.frequency.exponentialRampToValueAtTime(170, t + 0.06);
+    g.gain.setValueAtTime(0.24 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    o.connect(g);
+    o.start(t); o.stop(t + 0.075);
+  } else if (kind === 'puck_hit') {
+    // Air hockey: estalo plástico nítido e seco de impacto do malho
+    const o = audioCtx.createOscillator();
+    o.type = 'triangle';
+    o.frequency.setValueAtTime(1300, t);
+    o.frequency.exponentialRampToValueAtTime(300, t + 0.035);
+    g.gain.setValueAtTime(0.32 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+    o.connect(g);
+    o.start(t); o.stop(t + 0.045);
+  } else if (kind === 'puck_wall') {
+    // Air hockey: batida na borda de alumínio
+    const o = audioCtx.createOscillator();
+    o.type = 'sine';
+    o.frequency.setValueAtTime(840, t);
+    o.frequency.exponentialRampToValueAtTime(280, t + 0.06);
+    g.gain.setValueAtTime(0.22 * vol, t);
+    g.gain.exponentialRampToValueAtTime(0.001, t + 0.07);
+    o.connect(g);
+    o.start(t); o.stop(t + 0.075);
+  } else if (kind === 'pins' || kind === 'pin_hit') {
+    // Boliche: dispersão e estalo de pinos de madeira
+    const isFullScatter = kind === 'pins';
+    const freqs = isFullScatter ? [1050, 1420, 1850, 2200, 780] : [1250, 1720];
+    // Baque grave inicial da bola pesada
+    if (isFullScatter) {
+      const thud = audioCtx.createOscillator();
+      const thudG = audioCtx.createGain();
+      thud.type = 'sine';
+      thud.frequency.setValueAtTime(110, t);
+      thud.frequency.exponentialRampToValueAtTime(45, t + 0.12);
+      thudG.gain.setValueAtTime(0.35 * vol, t);
+      thudG.gain.exponentialRampToValueAtTime(0.001, t + 0.14);
+      thud.connect(thudG);
+      thudG.connect(masterGain);
+      thud.start(t); thud.stop(t + 0.15);
+    }
+    // Múltiplos estalos de pinos ressonantes defasados
+    freqs.forEach((freq, i) => {
+      const st = t + (isFullScatter ? i * 0.025 + Math.random() * 0.02 : 0);
+      const o = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.setValueAtTime(freq, st);
+      o.frequency.exponentialRampToValueAtTime(freq * 0.5, st + 0.09);
+      og.gain.setValueAtTime(0.22 * vol, st);
+      og.gain.exponentialRampToValueAtTime(0.001, st + 0.11);
+      o.connect(og);
+      og.connect(masterGain);
+      o.start(st); o.stop(st + 0.12);
+    });
+  } else if (kind === 'victory') {
+    // Fanfarra triunfal para o campeão
+    const chord = [
+      { f: 523.25, d: 0.12, w: 0 },
+      { f: 659.25, d: 0.12, w: 0.1 },
+      { f: 783.99, d: 0.15, w: 0.2 },
+      { f: 1046.50, d: 0.55, w: 0.32 },
+      { f: 1318.51, d: 0.55, w: 0.34 },
+    ];
+    chord.forEach(({ f, d, w }) => {
+      const st = t + w;
+      const o = audioCtx.createOscillator();
+      const og = audioCtx.createGain();
+      o.type = 'triangle';
+      o.frequency.value = f;
+      og.gain.setValueAtTime(0.25 * vol, st);
+      og.gain.exponentialRampToValueAtTime(0.001, st + d);
+      o.connect(og);
+      og.connect(masterGain);
+      o.start(st); o.stop(st + d + 0.02);
+    });
   }
 }
 

@@ -1,0 +1,8 @@
+{
+  "name": "hub-de-jogos",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node test_suite.mjs"
+  }
+}

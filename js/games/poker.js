@@ -249,12 +249,12 @@ export default {
     function refreshUi() {
       const v = view;
       if (!v) return;
-      env.setSub(0, `💰 ${v.chips[0]} <span class="muted">aposta ${v.roundBet[0]}</span>`);
-      env.setSub(1, `💰 ${v.chips[1]} <span class="muted">aposta ${v.roundBet[1]}</span>`);
+      env.setSub(0, `Fichas: <b>${v.chips[0]}</b> <span class="muted">(aposta: ${v.roundBet[0]})</span>`);
+      env.setSub(1, `Fichas: <b>${v.chips[1]}</b> <span class="muted">(aposta: ${v.roundBet[1]})</span>`);
       env.setMsg(v.line || '');
       if (!v.over) {
         env.setHint(env.seat === -1
-          ? '👁 Assistindo (cartas fechadas ocultas até o showdown)'
+          ? 'Modo Espectador · Cartas fechadas ocultas até o showdown'
           : myTurnToAct() ? 'Sua vez de agir.' : v.phase === 'bet' ? `Vez de ${env.names[v.toAct]}…` : '');
       }
       if (myTurnToAct()) {

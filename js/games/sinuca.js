@@ -52,7 +52,7 @@ export default {
       env.setMsg(state.msg || '');
       let hint = '';
       if (!state.over) {
-        if (env.seat === -1) hint = `👁 Assistindo. ${env.names[state.turn]} joga.`;
+        if (env.seat === -1) hint = `Modo Espectador · Vez de ${env.names[state.turn]}`;
         else if (state.ballInHand && myTurn()) hint = 'Bola na mão: toque na mesa para posicionar a branca.';
         else if (myTurn() && !shooting && !remoteShooting) hint = 'Mire com o cursor, pressione e puxe para trás; solte para tacar.';
         else if (!myTurn() && !env.isLocal) hint = `Aguardando ${env.names[state.turn]}…`;
